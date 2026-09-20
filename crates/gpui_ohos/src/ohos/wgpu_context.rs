@@ -1,6 +1,7 @@
 use anyhow::Context as _;
 use std::sync::Arc;
 use util::ResultExt;
+use wgpu::hal::Instance as _;
 
 pub struct WgpuContext {
     pub instance: wgpu::Instance,
@@ -81,14 +82,18 @@ impl WgpuContext {
             );
         }
 
-        let (device, queue) = smol::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("gpui_device"),
-            required_features,
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            trace: wgpu::Trace::Off,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-        }))
+        let (device, queue) = smol::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("gpui_device"),
+                required_features,
+                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                    .using_resolution(adapter.limits())
+                    .using_alignment(adapter.limits()),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            }),
+        )
         .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
 
         Ok(Self {
@@ -104,6 +109,41 @@ impl WgpuContext {
         instance: &wgpu::Instance,
         device_id_filter: Option<u32>,
     ) -> anyhow::Result<wgpu::Adapter> {
+        if let Some(hal_instance) = unsafe { instance.as_hal::<wgpu::hal::api::Gles>() } {
+            // SAFETY: The exposed adapters are enumerated from the HAL instance owned by
+            // this exact wgpu instance and are immediately imported back into it.
+            let mut adapters = unsafe { hal_instance.enumerate_adapters(None) };
+            anyhow::ensure!(!adapters.is_empty(), "No OpenGL ES adapters found");
+
+            let selected_index = device_id_filter
+                .and_then(|device_id| {
+                    adapters
+                        .iter()
+                        .position(|adapter| adapter.info.device == device_id)
+                })
+                .unwrap_or(0);
+            let mut adapter = adapters.swap_remove(selected_index);
+
+            // OpenHarmony's GLES compatibility layer reports GL_MAX_VARYING_COMPONENTS
+            // using a non-component unit. wgpu-hal divides that value by four and exposes
+            // only 7 variables on the emulator, although GLES 3 guarantees at least 15.
+            // Correct the imported adapter metadata in the platform adaptation layer.
+            let webgl2_minimum =
+                wgpu::Limits::downlevel_webgl2_defaults().max_inter_stage_shader_variables;
+            if adapter.capabilities.limits.max_inter_stage_shader_variables < webgl2_minimum {
+                log::warn!(
+                    "Correcting OpenHarmony GLES max_inter_stage_shader_variables from {} to {}",
+                    adapter.capabilities.limits.max_inter_stage_shader_variables,
+                    webgl2_minimum
+                );
+                adapter.capabilities.limits.max_inter_stage_shader_variables = webgl2_minimum;
+            }
+
+            // SAFETY: `adapter` was created by `hal_instance`, which is the internal
+            // GLES instance backing `instance`.
+            return Ok(unsafe { instance.create_adapter_from_hal(adapter) });
+        }
+
         if let Some(device_id) = device_id_filter {
             let adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all()).await;
 

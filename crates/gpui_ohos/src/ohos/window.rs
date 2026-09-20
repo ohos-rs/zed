@@ -741,9 +741,36 @@ impl OhosWindow {
                 }
             }
             Event::WindowResize(ohos_size) => {
+                // openharmony-ability currently maps both the ArkTS windowSizeChange callback and
+                // the XComponent surface callback to WindowResize. In a floating 2-in-1 window the
+                // former includes the server-side title bar, while the native render surface does
+                // not. Prefer the active XComponent rect whenever it is available so that the
+                // renderer and GPUI viewport always use the drawable content size.
+                let content_rect = self
+                    .app
+                    .borrow()
+                    .as_ref()
+                    .map(|app| app.content_rect())
+                    .unwrap_or_default();
+                let device_width = if content_rect.width > 0 {
+                    content_rect.width
+                } else {
+                    ohos_size.width
+                };
+                let device_height = if content_rect.height > 0 {
+                    content_rect.height
+                } else {
+                    ohos_size.height
+                };
+                if device_width != ohos_size.width || device_height != ohos_size.height {
+                    debug!(
+                        "OhosWindow: Normalizing window resize {}x{} to XComponent surface {}x{}",
+                        ohos_size.width, ohos_size.height, device_width, device_height,
+                    );
+                }
                 let scale = *self.scale.borrow();
-                let width = ohos_size.width as f32;
-                let height = ohos_size.height as f32;
+                let width = device_width as f32;
+                let height = device_height as f32;
                 let new_size = size(px(width / scale), px(height / scale));
                 let origin = self.bounds.borrow().origin;
                 *self.bounds.borrow_mut() = Bounds::new(origin, new_size);
