@@ -29,8 +29,12 @@ pub mod scap_screen_capture;
     feature = "screen-capture"
 ))]
 pub(crate) type PlatformScreenCaptureFrame = scap::frame::Frame;
-#[cfg(not(feature = "screen-capture"))]
+#[cfg(all(not(target_env = "ohos"), not(feature = "screen-capture")))]
 pub(crate) type PlatformScreenCaptureFrame = ();
+// OHOS supplies raw RGBA frames through AVScreenCapture. Its implementation lives
+// in gpui-ohos, so the shared frame type must remain available without `scap`.
+#[cfg(target_env = "ohos")]
+pub(crate) type PlatformScreenCaptureFrame = image::RgbaImage;
 #[cfg(all(target_os = "macos", feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame =
     objc2_core_foundation::CFRetained<objc2_core_video::CVImageBuffer>;
