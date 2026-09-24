@@ -375,7 +375,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
 
     let use_system_window_tabs = WorkspaceSettings::get_global(cx).use_system_window_tabs;
 
-    #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        not(target_env = "ohos")
+    ))]
     static APP_ICON: std::sync::LazyLock<Option<std::sync::Arc<image::RgbaImage>>> =
         std::sync::LazyLock::new(|| {
             // this shouldn't fail since decode is checked in build.rs
@@ -410,7 +413,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         display_id: display.map(|display| display.id()),
         window_background: cx.theme().window_background_appearance(),
         app_id: Some(app_id.to_owned()),
-        #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))]
+        #[cfg(all(
+            any(target_os = "linux", target_os = "freebsd"),
+            not(target_env = "ohos")
+        ))]
         icon: APP_ICON.as_ref().cloned(),
         window_decorations: Some(window_decorations),
         window_min_size: Some(gpui::Size {

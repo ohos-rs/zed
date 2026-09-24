@@ -840,6 +840,12 @@ macro_rules! __fs_embed {
 
         #[cfg(debug_assertions)]
         impl $crate::__rust_embed::RustEmbed for $name {
+            fn compressed(
+                _file_path: &str,
+            ) -> ::core::option::Option<$crate::__rust_embed::EmbeddedCompressedFile> {
+                None
+            }
+
             fn get(
                 file_path: &str,
             ) -> ::core::option::Option<$crate::__rust_embed::EmbeddedFile> {

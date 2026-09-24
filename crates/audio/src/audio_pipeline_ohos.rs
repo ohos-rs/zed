@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use collections::HashMap;
 use gpui::{App, Global};
 
@@ -38,9 +38,7 @@ impl Audio {
     pub fn end_call(_cx: &mut App) {}
 }
 
-pub fn init(cx: &mut App) {
-    crate::audio_settings::LIVE_SETTINGS.initialize(cx);
-}
+pub fn init(_cx: &mut App) {}
 
 pub fn ensure_devices_initialized(cx: &mut App) {
     if !cx.has_global::<AvailableAudioDevices>() {
@@ -130,7 +128,7 @@ impl std::fmt::Display for AudioDeviceInfo {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub struct AvailableAudioDevices(pub Vec<AudioDeviceInfo>);
 
 impl Global for AvailableAudioDevices {}

@@ -20,17 +20,22 @@ mod visual_test;
 
 #[cfg(all(
     feature = "screen-capture",
-    any(target_os = "windows", target_os = "linux", target_os = "freebsd",)
+    any(target_os = "windows", target_os = "linux", target_os = "freebsd",),
+    not(target_env = "ohos")
 ))]
 pub mod scap_screen_capture;
 
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
+    not(target_env = "ohos"),
     feature = "screen-capture"
 ))]
 pub(crate) type PlatformScreenCaptureFrame = scap::frame::Frame;
-#[cfg(not(feature = "screen-capture"))]
+#[cfg(all(not(target_env = "ohos"), not(feature = "screen-capture")))]
 pub(crate) type PlatformScreenCaptureFrame = ();
+// The external OHOS backend supplies RGBA frames without using scap.
+#[cfg(target_env = "ohos")]
+pub(crate) type PlatformScreenCaptureFrame = image::RgbaImage;
 #[cfg(all(target_os = "macos", feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame =
     objc2_core_foundation::CFRetained<objc2_core_video::CVImageBuffer>;

@@ -169,6 +169,10 @@ pub fn data_dir() -> &'static PathBuf {
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
+        if cfg!(target_env = "ohos") {
+            return data_dir().join("state");
+        }
+
         if cfg!(target_os = "macos") {
             return home_dir().join(".local").join("state").join(APP_NAME);
         }

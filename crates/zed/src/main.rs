@@ -31,6 +31,7 @@ use git_ui::clone::clone_and_open;
 use gpui::{
     App, AppContext, Application, AsyncApp, QuitMode, Task, TaskExt, UpdateGlobal as _, block_on,
 };
+#[cfg(not(target_env = "ohos"))]
 use gpui_platform;
 
 use gpui_tokio::Tokio;
@@ -93,7 +94,7 @@ fn build_application() -> Application {
             process::exit(1);
         }
     });
-    if std::env::var("ZED_EXPERIMENTAL_A11Y").as_deref() == Ok("1") {
+    if cfg!(target_env = "ohos") || std::env::var("ZED_EXPERIMENTAL_A11Y").as_deref() == Ok("1") {
         Application::with_platform(platform)
     } else {
         Application::new_inaccessible(platform)
@@ -128,7 +129,11 @@ fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
         .collect::<Vec<_>>().join("\n\n");
 
     eprintln!("{message}: {error_details}");
-    run_application(build_application().with_assets(Assets).with_quit_mode(QuitMode::Explicit), move |cx| {
+    run_application(
+        build_application()
+            .with_assets(Assets)
+            .with_quit_mode(QuitMode::Explicit),
+        move |cx| {
             if let Ok(window) = cx.open_window(gpui::WindowOptions::default(), |_, cx| {
                 cx.new(|_| gpui::Empty)
             }) {
@@ -152,7 +157,8 @@ fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
             } else {
                 fail_to_open_window(anyhow::anyhow!("{message}: {error_details}"), cx)
             }
-        })
+        },
+    )
 }
 
 fn fail_to_open_window_async(e: anyhow::Error, cx: &mut AsyncApp) {
@@ -169,7 +175,10 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
     }
 
     // Maybe unify this with gpui::platform::linux::platform::ResultExt::notify_err(..)?
-    #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        not(target_env = "ohos")
+    ))]
     {
         use ashpd::desktop::notification::{Notification, NotificationProxy, Priority};
         _cx.spawn(async move |_cx| {
@@ -217,7 +226,8 @@ thread_local! {
 fn run_application(app: Application, on_finish_launching: impl FnOnce(&mut App) + 'static) {
     #[cfg(target_env = "ohos")]
     OHOS_APPLICATION.with(|application| {
-        *application.borrow_mut() = Some(app.run_embedded(on_finish_launching));
+        let handle = app.run_embedded(on_finish_launching);
+        application.replace(Some(handle));
     });
 
     #[cfg(not(target_env = "ohos"))]
@@ -402,7 +412,10 @@ fn main() {
     {
         false
     } else {
-        #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))]
+        #[cfg(all(
+            any(target_os = "linux", target_os = "freebsd"),
+            not(target_env = "ohos")
+        ))]
         {
             crate::zed::listen_for_cli_connections(open_listener.clone()).is_err()
         }
@@ -424,7 +437,10 @@ fn main() {
         }
 
         #[cfg(not(any(
-            all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")),
+            all(
+                any(target_os = "linux", target_os = "freebsd"),
+                not(target_env = "ohos")
+            ),
             target_os = "windows",
             target_os = "macos",
             target_env = "ohos",

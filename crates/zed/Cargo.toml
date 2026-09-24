@@ -124,7 +124,7 @@ git_hosting_providers.workspace = true
 git_ui = { workspace = true, features = ["call"] }
 git_ui_core.workspace = true
 go_to_line.workspace = true
-gpui = { workspace = true, features = ["profiler", "stacker"] }
+gpui = { workspace = true, features = ["profiler"] }
 gpui_platform = { workspace = true, features = ["screen-capture", "font-kit"] }
 gpui_tokio.workspace = true
 hdrhistogram.workspace = true
@@ -240,9 +240,11 @@ etw_tracing.workspace = true
 windows.workspace = true
 gpui = { workspace = true, features = ["profiler", "windows-manifest"] }
 
+[target.'cfg(not(target_env = "ohos"))'.dependencies]
+gpui = { workspace = true, features = ["stacker"] }
+
 [target.'cfg(target_env = "ohos")'.dependencies]
-gpui = { workspace = true, default-features = false, features = ["input-latency-histogram"] }
-gpui_platform = { workspace = true, features = ["font-kit"] }
+util = { workspace = true, features = ["debug-embed"] }
 
 [target.'cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))'.dependencies]
 gpui = { workspace = true, features = ["profiler", "wayland", "x11"] }
