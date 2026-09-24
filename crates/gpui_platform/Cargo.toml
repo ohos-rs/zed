@@ -10,18 +10,29 @@ workspace = true
 
 [lib]
 path = "src/gpui_platform.rs"
+doctest = false
 
 [features]
 default = []
+bench-support = ["gpui/bench-support", "gpui_macos/bench-support"]
 font-kit = ["gpui_macos/font-kit"]
-test-support = ["gpui/test-support", "gpui_macos/test-support"]
+inspector = ["gpui/inspector"]
+test-support = ["gpui/test-support", "gpui_macos/test-support", "gpui_windows/test-support"]
 screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture", "gpui_windows/screen-capture", "gpui_linux/screen-capture"]
 runtime_shaders = ["gpui_macos/runtime_shaders"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
 
+[[bench]]
+name = "inspector_render"
+harness = false
+required-features = ["bench-support"]
+
 [dependencies]
 gpui.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos.workspace = true
@@ -30,12 +41,9 @@ gpui_macos.workspace = true
 gpui_windows.workspace = true
 gpui = { workspace = true, features = ["windows-manifest"] }
 
-[target.'cfg(target_env = "ohos")'.dependencies]
-gpui_ohos.workspace = true
-
 [target.'cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))'.dependencies]
 gpui_linux.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 gpui_web.workspace = true
-console_error_panic_hook = "0.1.7"
+console_error_panic_hook.workspace = true

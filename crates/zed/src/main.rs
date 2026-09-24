@@ -1,4 +1,5 @@
 mod reliability;
+mod watcher_debug;
 mod zed;
 
 // Ensure the binary name stays in sync with APP_NAME so that the paths used
@@ -12,8 +13,6 @@ const _: () = assert!(
      Forks: update APP_NAME in crates/paths/src/paths.rs when renaming the binary.",
 );
 
-use agent::{SharedThread, ThreadStore};
-use agent_client_protocol::schema as acp;
 use agent_ui::AgentPanel;
 use anyhow::{Context as _, Result};
 use clap::Parser;
@@ -26,12 +25,11 @@ use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use editor::Editor;
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
-use futures::{StreamExt, channel::oneshot, future};
+use futures::{FutureExt, StreamExt, channel::oneshot, future};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
 use gpui::{
-    App, AppContext, Application, AsyncApp, Focusable as _, QuitMode, Task, TaskExt,
-    UpdateGlobal as _, block_on,
+    App, AppContext, Application, AsyncApp, QuitMode, Task, TaskExt, UpdateGlobal as _, block_on,
 };
 use gpui_platform;
 
@@ -47,7 +45,6 @@ use assets::Assets;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use parking_lot::Mutex;
 use project::{project_settings::ProjectSettings, trusted_worktrees};
-use proto;
 use recent_projects::{RemoteSettings, open_remote_project};
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use session::{AppSession, Session};
@@ -65,11 +62,13 @@ use std::{
 };
 use theme::{ActiveTheme, GlobalTheme, ThemeRegistry};
 use theme_settings::load_user_theme;
-use util::{ResultExt, TryFutureExt, maybe};
+use util::{ResultExt, maybe};
 use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
-    WorkspaceSettings, WorkspaceStore, notifications::NotificationId, restore_multiworkspace,
+    WorkspaceSettings, WorkspaceStore,
+    notifications::{NotificationId, NotifyResultExt},
+    restore_multiworkspace,
 };
 use zed::{
     OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
@@ -77,14 +76,29 @@ use zed::{
     handle_keymap_file_changes, initialize_workspace, open_paths_with_positions,
 };
 
-#[cfg(target_env = "ohos")]
-use openharmony_ability::OpenHarmonyApp;
-
 use crate::zed::{CrashHandler, OpenRequestKind, eager_load_active_theme_and_icon_theme};
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+fn build_application() -> Application {
+    #[cfg(not(target_env = "ohos"))]
+    let platform = gpui_platform::current_platform(false);
+    #[cfg(target_env = "ohos")]
+    let platform = OHOS_PLATFORM.with(|platform| match platform.borrow().as_ref() {
+        Some(platform) => platform.clone(),
+        None => {
+            eprintln!("Zed's OpenHarmony platform has not been initialized");
+            process::exit(1);
+        }
+    });
+    if std::env::var("ZED_EXPERIMENTAL_A11Y").as_deref() == Ok("1") {
+        Application::with_platform(platform)
+    } else {
+        Application::new_inaccessible(platform)
+    }
+}
 
 fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
     let message = "Zed failed to launch";
@@ -114,9 +128,7 @@ fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
         .collect::<Vec<_>>().join("\n\n");
 
     eprintln!("{message}: {error_details}");
-    create_application()
-        .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx| {
+    run_application(build_application().with_assets(Assets).with_quit_mode(QuitMode::Explicit), move |cx| {
             if let Ok(window) = cx.open_window(gpui::WindowOptions::default(), |_, cx| {
                 cx.new(|_| gpui::Empty)
             }) {
@@ -197,48 +209,43 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
 static STARTUP_TIME: OnceLock<Instant> = OnceLock::new();
 
 #[cfg(target_env = "ohos")]
-static OHOS_ENTRY_APP: OnceLock<OpenHarmonyApp> = OnceLock::new();
-
-#[cfg(target_env = "ohos")]
-pub(crate) fn set_ohos_entry_app(app: OpenHarmonyApp) {
-    if let Err(app) = OHOS_ENTRY_APP.set(app) {
-        drop(app);
-    }
+thread_local! {
+    static OHOS_PLATFORM: RefCell<Option<Rc<dyn gpui::Platform>>> = RefCell::new(None);
+    static OHOS_APPLICATION: RefCell<Option<gpui::ApplicationHandle>> = RefCell::new(None);
 }
 
-fn create_application() -> Application {
-    #[cfg(not(target_env = "ohos"))]
-    {
-        Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets)
-    }
-
+fn run_application(app: Application, on_finish_launching: impl FnOnce(&mut App) + 'static) {
     #[cfg(target_env = "ohos")]
-    {
-        let application = Application::with_platform(gpui_platform::current_platform(false));
-        if let Some(app) = OHOS_ENTRY_APP.get() {
-            application
-                .with_ohos_app(app.clone())
-                .with_assets(Assets)
-        } else {
-            application.with_assets(Assets)
-        }
-    }
+    OHOS_APPLICATION.with(|application| {
+        *application.borrow_mut() = Some(app.run_embedded(on_finish_launching));
+    });
+
+    #[cfg(not(target_env = "ohos"))]
+    app.run(on_finish_launching);
 }
 
 #[cfg(target_env = "ohos")]
-pub(crate) fn run_with_ability_entry(app: OpenHarmonyApp) {
-    if let Some(base_path) = app.base_path().filter(|path| !path.is_empty()) {
+pub fn run_with_ohos_platform(platform: Rc<dyn gpui::Platform>, base_path: Option<&str>) {
+    if let Some(base_path) = base_path.filter(|path| !path.is_empty()) {
         let data_dir = PathBuf::from(base_path).join("zed");
         if let Some(data_dir) = data_dir.to_str() {
             paths::set_custom_data_dir(data_dir);
         }
     }
-    set_ohos_entry_app(app);
+    OHOS_PLATFORM.with(|current_platform| {
+        *current_platform.borrow_mut() = Some(platform);
+    });
     main();
 }
 
 fn main() {
     STARTUP_TIME.get_or_init(|| Instant::now());
+
+    // If this process was re-executed as a Linux sandbox helper, run that mode
+    // without returning. Must run before argument parsing: the wrapped command's
+    // args are appended verbatim and would otherwise be misinterpreted as Zed's
+    // own arguments.
+    sandbox::run_sandbox_launcher_if_invoked();
 
     #[cfg(unix)]
     util::prevent_root_execution();
@@ -260,37 +267,16 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     if args.record_etw_trace {
-        let zed_pid = args
-            .etw_zed_pid
-            .and_then(|pid| if pid >= 0 { Some(pid as u32) } else { None });
-        let Some(output_path) = args.etw_output else {
-            eprintln!("--etw-output is required for --record-etw-trace");
-            process::exit(1);
-        };
-
         let Some(etw_socket) = args.etw_socket else {
             eprintln!("--etw-socket is required for --record-etw-trace");
             process::exit(1);
         };
 
-        if let Err(error) =
-            etw_tracing::record_etw_trace(zed_pid, &output_path, etw_socket.as_str())
-        {
+        if let Err(error) = etw_tracing::record_etw_trace(args.etw_zed_pid, &etw_socket) {
             eprintln!("ETW trace recording failed: {error:#}");
             process::exit(1);
         }
         return;
-    }
-
-    // `zed --nc` Makes zed operate in nc/netcat mode for use with MCP
-    if let Some(socket) = &args.nc {
-        match nc::main(socket) {
-            Ok(()) => return,
-            Err(err) => {
-                eprintln!("Error: {}", err);
-                process::exit(1);
-            }
-        }
     }
 
     #[cfg(all(not(debug_assertions), target_os = "windows"))]
@@ -313,10 +299,15 @@ fn main() {
         return;
     }
 
-    // Set custom data directory.
-    if let Some(dir) = &args.user_data_dir {
-        paths::set_custom_data_dir(dir);
-    }
+    let restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
+        let directory = paths::set_custom_data_dir(directory);
+        vec![
+            std::ffi::OsString::from("--user-data-dir"),
+            directory.as_os_str().to_owned(),
+        ]
+    } else {
+        Vec::new()
+    };
 
     #[cfg(target_os = "windows")]
     match util::get_zed_cli_path() {
@@ -347,6 +338,9 @@ fn main() {
         };
     }
     ztracing::init();
+
+    #[cfg(unix)]
+    util::increase_open_file_limit().log_err();
 
     let version = option_env!("ZED_BUILD_ID");
     let app_commit_sha =
@@ -385,7 +379,9 @@ fn main() {
     #[cfg(windows)]
     check_for_conpty_dll();
 
-    let app = create_application();
+    let app = build_application()
+        .with_assets(Assets)
+        .with_restart_arguments(restart_arguments);
 
     let app_db = db::AppDatabase::new();
     let system_id = app.background_executor().spawn(system_id());
@@ -442,11 +438,8 @@ fn main() {
         return;
     }
 
-    let should_install_crash_handler = matches!(
-        env::var("ZED_GENERATE_MINIDUMPS").as_deref(),
-        Ok("true" | "1")
-    ) || *release_channel::RELEASE_CHANNEL
-        != ReleaseChannel::Dev;
+    let should_install_crash_handler =
+        client::telemetry::should_install_crash_handler(*release_channel::RELEASE_CHANNEL);
 
     let crash_handler = if should_install_crash_handler {
         Some(
@@ -495,7 +488,7 @@ fn main() {
         log::info!("Using git binary path: {:?}", git_binary_path);
     }
 
-    let fs = Arc::new(RealFs::new(git_binary_path, app.background_executor()));
+    let fs = RealFs::new(git_binary_path, app.background_executor());
     let (user_keymap_file_rx, user_keymap_watcher) = watch_config_file(
         &app.background_executor(),
         fs.clone(),
@@ -538,7 +531,7 @@ fn main() {
         }
     });
 
-    app.run(move |cx| {
+    run_application(app, move |cx| {
         cx.set_global(app_db);
         let db_trusted_paths = match workspace::WorkspaceDb::global(cx).fetch_trusted_worktrees() {
             Ok(trusted_paths) => trusted_paths,
@@ -716,10 +709,11 @@ fn main() {
         });
         AppState::set_global(app_state.clone(), cx);
 
+        watcher_debug::init(app_state.clone(), cx);
         auto_update::init(client.clone(), cx);
         dap_adapters::init(cx);
         auto_update_ui::init(cx);
-        reliability::init(client.clone(), cx);
+        reliability::init(client.clone(), app_state.workspace_store.clone(), cx);
         extension_host::init(
             extension_host_proxy.clone(),
             app_state.fs.clone(),
@@ -743,9 +737,10 @@ fn main() {
                 .enterprise_uri
                 .clone(),
         };
+        let credentials_provider = zed_credentials_provider::global(cx);
         copilot_chat::init(
-            app_state.fs.clone(),
             app_state.client.http_client(),
+            credentials_provider,
             copilot_chat_configuration,
             cx,
         );
@@ -780,12 +775,15 @@ fn main() {
             false,
             cx,
         );
+        zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);
         dev_container::init(cx);
 
         load_embedded_fonts(cx);
+        #[cfg(target_os = "linux")]
+        prewarm_fonts(cx);
 
         editor::init(cx);
         image_viewer::init(cx);
@@ -800,6 +798,7 @@ fn main() {
         file_finder::init(cx);
         tab_switcher::init(cx);
         outline::init(cx);
+        call_hierarchy::init(cx);
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
@@ -807,6 +806,7 @@ fn main() {
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
+        lsp_locations::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {
                 let search_bar = cx.new(|cx| search::BufferSearchBar::new(languages, window, cx));
@@ -822,6 +822,7 @@ fn main() {
         encoding_selector::init(cx);
         language_selector::init(cx);
         line_ending_selector::init(cx);
+        lsp_command_selector::init(cx);
         toolchain_selector::init(cx);
         theme_selector::init(cx);
         settings_profile_selector::init(cx);
@@ -830,10 +831,9 @@ fn main() {
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         collab_ui::init(&app_state, cx);
         git_ui::init(cx);
-        git_graph::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
-        csv_preview::init(cx);
+        tabular_data_preview::init(cx);
         svg_preview::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
@@ -969,6 +969,7 @@ fn main() {
                 wsl,
                 diff_all: diff_all_mode,
                 dev_container: args.dev_container,
+                ..Default::default()
             })
         }
 
@@ -985,6 +986,14 @@ fn main() {
             .ok()
             .and_then(|request| OpenRequest::parse(request, cx).log_err())
         {
+            Some(request) if request.is_focus_app_only() => cx.spawn({
+                let app_state = app_state.clone();
+                async move |cx| {
+                    if let Err(e) = restore_or_create_workspace(app_state, cx).await {
+                        fail_to_open_window_async(e, cx)
+                    }
+                }
+            }),
             Some(request) => {
                 handle_open_request(request, app_state.clone(), cx);
                 Task::ready(())
@@ -999,11 +1008,22 @@ fn main() {
             }),
         };
 
+        let (first_window_tx, first_window_rx) = oneshot::channel::<()>();
+        let first_window_tx = Rc::new(RefCell::new(Some(first_window_tx)));
+        let _first_window_subscription = cx.observe_new::<MultiWorkspace>(move |_, _, _| {
+            if let Some(tx) = first_window_tx.borrow_mut().take() {
+                tx.send(()).ok();
+            }
+        });
+
+        let restore_finished = cx.background_spawn(restore_task).shared();
+
         cx.spawn({
             let db = workspace::WorkspaceDb::global(cx);
             let fs = app_state.fs.clone();
+            let restore_finished = restore_finished.clone();
             async move |_cx| {
-                restore_task.await;
+                restore_finished.await;
                 db.garbage_collect_workspaces(
                     fs.as_ref(),
                     &current_session_id,
@@ -1019,7 +1039,16 @@ fn main() {
         component_preview::init(app_state.clone(), cx);
 
         cx.spawn(async move |cx| {
+            let _first_window_subscription = _first_window_subscription;
+            let first_window_placed = first_window_rx.shared();
             while let Some(urls) = open_rx.next().await {
+                // On a macOS cold launch, `zed <path>` arrives here after startup already
+                // began restoring the session, so wait for a restored window to exist before
+                // matching. Otherwise this open sees no windows and spawns a redundant one (#61346).
+                futures::select_biased! {
+                    _ = restore_finished.clone() => {}
+                    _ = first_window_placed.clone() => {}
+                }
                 cx.update(|cx| {
                     if let Some(request) = OpenRequest::parse(urls, cx).log_err() {
                         handle_open_request(request, app_state.clone(), cx);
@@ -1037,6 +1066,15 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
             OpenRequestKind::CliConnection(connection) => {
                 cx.spawn(async move |cx| handle_cli_connection(connection, app_state, cx).await)
                     .detach();
+            }
+            OpenRequestKind::FocusApp => {
+                cx.spawn(async move |cx| {
+                    if workspace::activate_any_workspace_window(cx).is_some() {
+                        return anyhow::Ok(());
+                    }
+                    restore_or_create_workspace(app_state, cx).await
+                })
+                .detach_and_log_err(cx);
             }
             OpenRequestKind::Extension { extension_id } => {
                 cx.spawn(async move |cx| {
@@ -1061,6 +1099,15 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                     let multi_workspace =
                         workspace::get_any_active_multi_workspace(app_state, cx.clone()).await?;
 
+                    let panels_task = multi_workspace.update(cx, |multi_workspace, _, cx| {
+                        multi_workspace
+                            .workspace()
+                            .update(cx, |workspace, _| workspace.take_panels_task())
+                    })?;
+                    if let Some(task) = panels_task {
+                        task.await.log_err();
+                    }
+
                     multi_workspace.update(cx, |multi_workspace, window, cx| {
                         multi_workspace.workspace().update(cx, |workspace, cx| {
                             if let Some(panel) = workspace.focus_panel::<AgentPanel>(window, cx) {
@@ -1071,90 +1118,29 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                                         cx,
                                     );
                                 });
+                            } else {
+                                log::warn!(
+                                    "zed://agent received but the AgentPanel is not registered \
+                                     (is `disable_ai` enabled?)"
+                                );
                             }
                         });
                     })
                 })
                 .detach_and_log_err(cx);
             }
-            OpenRequestKind::SharedAgentThread { session_id } => {
+            OpenRequestKind::InstallSkill { content } => {
                 cx.spawn(async move |cx| {
                     let multi_workspace =
-                        workspace::get_any_active_multi_workspace(app_state.clone(), cx.clone())
-                            .await?;
+                        workspace::get_any_active_multi_workspace(app_state, cx.clone()).await?;
 
-                    let workspace =
-                        multi_workspace.read_with(cx, |mw, _| mw.workspace().clone())?;
-
-                    let (client, thread_store) =
-                        multi_workspace.update(cx, |_, _window, cx| {
-                            workspace.update(cx, |workspace, cx| {
-                                let client = workspace.project().read(cx).client();
-                                let thread_store: Option<gpui::Entity<ThreadStore>> = workspace
-                                    .panel::<AgentPanel>(cx)
-                                    .map(|panel| panel.read(cx).thread_store().clone());
-                                anyhow::Ok((client, thread_store))
-                            })
-                        })??;
-
-                    let Some(thread_store): Option<gpui::Entity<ThreadStore>> = thread_store else {
-                        anyhow::bail!("Agent panel not available");
-                    };
-
-                    let response = client
-                        .request(proto::GetSharedAgentThread {
-                            session_id: session_id.clone(),
-                        })
-                        .await
-                        .context("Failed to fetch shared thread")?;
-
-                    let shared_thread = SharedThread::from_bytes(&response.thread_data)?;
-                    let db_thread = shared_thread.to_db_thread();
-                    let session_id = acp::SessionId::new(session_id);
-
-                    let save_session_id = session_id.clone();
-
-                    thread_store
-                        .update(&mut cx.clone(), |store, cx| {
-                            store.save_thread(
-                                save_session_id.clone(),
-                                db_thread,
-                                Default::default(),
-                                cx,
-                            )
-                        })
-                        .await?;
-
-                    let sharer_username = response.sharer_username.clone();
-
-                    multi_workspace.update(cx, |_, window, cx| {
-                        workspace.update(cx, |workspace, cx| {
-                            if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                                panel.update(cx, |panel, cx| {
-                                    panel.open_thread(
-                                        session_id,
-                                        None,
-                                        Some(format!("🔗 {}", response.title).into()),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                                panel.focus_handle(cx).focus(window, cx);
-                            }
-
-                            struct ImportedThreadToast;
-                            workspace.show_toast(
-                                Toast::new(
-                                    NotificationId::unique::<ImportedThreadToast>(),
-                                    format!("Imported shared thread from {}", sharer_username),
-                                )
-                                .autohide(),
-                                cx,
-                            );
-                        });
-                    })?;
-
-                    anyhow::Ok(())
+                    multi_workspace.update(cx, |_multi_workspace, _window, cx| {
+                        settings_ui::open_skill_creator(
+                            settings_ui::pages::SkillCreatorOpenMode::Install { content },
+                            Some(multi_workspace),
+                            cx,
+                        );
+                    })
                 })
                 .detach_and_log_err(cx);
             }
@@ -1231,7 +1217,10 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                     workspace.update(cx, |_, window, cx| match setting_path {
                         None => window.dispatch_action(Box::new(zed_actions::OpenSettings), cx),
                         Some(setting_path) => window.dispatch_action(
-                            Box::new(zed_actions::OpenSettingsAt { path: setting_path }),
+                            Box::new(zed_actions::OpenSettingsAt {
+                                path: setting_path,
+                                target: None,
+                            }),
                             cx,
                         ),
                     })
@@ -1274,6 +1263,11 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                 });
             }
             OpenRequestKind::GitCommit { sha } => {
+                let base_open_options = zed::open_options_for_request(
+                    request.open_behavior,
+                    &workspace::SerializedWorkspaceLocation::Local,
+                    cx,
+                );
                 cx.spawn(async move |cx| {
                     let paths_with_position =
                         derive_paths_with_position(app_state.fs.as_ref(), request.open_paths).await;
@@ -1282,7 +1276,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                         &[],
                         false,
                         app_state,
-                        workspace::OpenOptions::default(),
+                        base_open_options,
                         cx,
                     )
                     .await?;
@@ -1324,16 +1318,12 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
     }
 
     if let Some(connection_options) = request.remote_connection {
+        let open_behavior = request.open_behavior;
+        let location = workspace::SerializedWorkspaceLocation::Remote(connection_options.clone());
+        let base_open_options = zed::open_options_for_request(open_behavior, &location, cx);
         cx.spawn(async move |cx| {
             let paths: Vec<PathBuf> = request.open_paths.into_iter().map(PathBuf::from).collect();
-            open_remote_project(
-                connection_options,
-                paths,
-                app_state,
-                workspace::OpenOptions::default(),
-                cx,
-            )
-            .await
+            open_remote_project(connection_options, paths, app_state, base_open_options, cx).await
         })
         .detach_and_log_err(cx);
         return;
@@ -1343,6 +1333,11 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
     let dev_container = request.dev_container;
     if !request.open_paths.is_empty() || !request.diff_paths.is_empty() {
         let app_state = app_state.clone();
+        let base_open_options = zed::open_options_for_request(
+            request.open_behavior,
+            &workspace::SerializedWorkspaceLocation::Local,
+            cx,
+        );
         task = Some(cx.spawn(async move |cx| {
             let paths_with_position =
                 derive_paths_with_position(app_state.fs.as_ref(), request.open_paths).await;
@@ -1353,14 +1348,14 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                 app_state,
                 workspace::OpenOptions {
                     open_in_dev_container: dev_container,
-                    ..Default::default()
+                    ..base_open_options
                 },
                 cx,
             )
             .await?;
             for result in results.into_iter().flatten() {
                 if let Err(err) = result {
-                    log::error!("Error opening path: {err}",);
+                    log::error!("Error opening path: {err:#}");
                 }
             }
             anyhow::Ok(())
@@ -1374,9 +1369,9 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                     task.await?;
                 }
                 let client = app_state.client.clone();
-                // we continue even if authentication fails as join_channel/ open channel notes will
+                // we continue even if connection fails as join_channel/ open channel notes will
                 // show a visible error message.
-                authenticate(client, cx).await.log_err();
+                client.connect(true, cx).await.into_response().log_err();
 
                 if let Some(channel_id) = request.join_channel {
                     cx.update(|cx| {
@@ -1395,6 +1390,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                     workspace::get_any_active_multi_workspace(app_state, cx.clone()).await?;
 
                 let workspace = workspace_window.read_with(cx, |mw, _| mw.workspace().clone())?;
+                let weak_workspace = workspace.downgrade();
 
                 let mut promises = Vec::new();
                 for (channel_id, heading) in request.open_channel_notes {
@@ -1406,10 +1402,11 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                             window,
                             cx,
                         )
-                        .log_err()
                     })?)
                 }
-                future::join_all(promises).await;
+                for result in future::join_all(promises).await {
+                    result.notify_workspace_async_err(weak_workspace.clone(), cx);
+                }
                 anyhow::Ok(())
             })
             .await;
@@ -1804,11 +1801,6 @@ struct Args {
     #[arg(long)]
     system_specs: bool,
 
-    /// Used for the MCP Server, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
-    #[arg(long, hide = true)]
-    nc: Option<String>,
-
     /// Used for recording minidumps on crashes by having Zed run a separate
     /// process communicating over a socket.
     #[arg(long, hide = true)]
@@ -1847,18 +1839,13 @@ struct Args {
 
     /// The PID of the Zed process to trace for heap analysis.
     #[cfg(target_os = "windows")]
-    #[arg(long, hide = true, allow_hyphen_values = true)]
-    etw_zed_pid: Option<i64>,
-
-    /// Output path for the ETW trace file.
-    #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
-    etw_output: Option<PathBuf>,
+    etw_zed_pid: Option<u32>,
 
     /// Unix socket path for IPC with the parent Zed process.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
-    etw_socket: Option<String>,
+    etw_socket: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -1915,6 +1902,50 @@ fn load_embedded_fonts(cx: &App) {
     cx.text_system()
         .add_fonts(embedded_fonts.into_inner())
         .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn prewarm_fonts(cx: &mut App) {
+    let theme_settings = theme::theme_settings(cx);
+    let ui_font = theme_settings.ui_font(cx).clone();
+    let buffer_font = theme_settings.buffer_font(cx).clone();
+    let mut fonts = vec![ui_font.clone(), buffer_font.clone()];
+    let mut add_variant = |base_font: &gpui::Font, weight, style| {
+        let mut font = base_font.clone();
+        font.weight = weight;
+        font.style = style;
+        fonts.push(font);
+    };
+
+    for weight in [
+        gpui::FontWeight::MEDIUM,
+        gpui::FontWeight::SEMIBOLD,
+        gpui::FontWeight::BOLD,
+    ] {
+        add_variant(&ui_font, weight, gpui::FontStyle::Normal);
+    }
+    add_variant(&ui_font, gpui::FontWeight::NORMAL, gpui::FontStyle::Italic);
+    add_variant(
+        &buffer_font,
+        gpui::FontWeight::BOLD,
+        gpui::FontStyle::Normal,
+    );
+    add_variant(
+        &buffer_font,
+        gpui::FontWeight::NORMAL,
+        gpui::FontStyle::Italic,
+    );
+    add_variant(
+        &buffer_font,
+        gpui::FontWeight::BOLD,
+        gpui::FontStyle::Italic,
+    );
+
+    let text_system = cx.text_system().clone();
+    cx.background_spawn(async move {
+        text_system.prewarm_fonts(&fonts);
+    })
+    .detach();
 }
 
 /// Spawns a background task to load the user themes from the themes directory.
@@ -1974,7 +2005,13 @@ fn watch_themes(fs: Arc<dyn fs::Fs>, cx: &mut App) {
 
         while let Some(paths) = events.next().await {
             for event in paths {
-                if fs.metadata(&event.path).await.ok().flatten().is_some() {
+                if fs
+                    .metadata(&event.path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| !m.is_dir)
+                {
                     let theme_registry = cx.update(|cx| ThemeRegistry::global(cx));
                     if let Some(bytes) = fs.load_bytes(&event.path).await.log_err()
                         && load_user_theme(&theme_registry, &bytes).log_err().is_some()

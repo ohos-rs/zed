@@ -9,6 +9,7 @@ mod remote_video_track_view;
 pub use remote_video_track_view::{RemoteVideoTrackView, RemoteVideoTrackViewEvent};
 #[cfg(not(target_env = "ohos"))]
 use rodio::DeviceTrait as _;
+use serde::{Deserialize, Serialize};
 
 mod record;
 pub use record::CaptureInput;
@@ -82,6 +83,15 @@ pub enum ConnectionQuality {
     Good,
     Poor,
     Lost,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+pub struct RemoteAudioPlaybackStats {
+    pub frames_received: u64,
+    pub frames_dropped: u64,
+    pub queue_underflows: u64,
+    pub current_queue_depth: u64,
+    pub maximum_queue_depth: u64,
 }
 
 #[derive(Debug, Clone)]
