@@ -3016,6 +3016,12 @@ impl Window {
         self.platform_window.show_window_menu(position)
     }
 
+    /// Opens a native application menu at content-local logical coordinates.
+    /// A missing name opens all application menus. Returns false if unsupported.
+    pub fn show_app_menu(&self, position: Point<Pixels>, menu_name: Option<&str>) -> bool {
+        self.platform_window.show_app_menu(position, menu_name)
+    }
+
     /// Handle window movement for Linux and macOS.
     /// Tells the compositor to take control of window movement (Wayland and X11)
     ///

@@ -20,17 +20,22 @@ mod visual_test;
 
 #[cfg(all(
     feature = "screen-capture",
-    any(target_os = "windows", target_os = "linux", target_os = "freebsd",)
+    any(target_os = "windows", target_os = "linux", target_os = "freebsd",),
+    not(target_env = "ohos")
 ))]
 pub mod scap_screen_capture;
 
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
+    not(target_env = "ohos"),
     feature = "screen-capture"
 ))]
 pub(crate) type PlatformScreenCaptureFrame = scap::frame::Frame;
-#[cfg(not(feature = "screen-capture"))]
+#[cfg(all(not(target_env = "ohos"), not(feature = "screen-capture")))]
 pub(crate) type PlatformScreenCaptureFrame = ();
+// The external OHOS backend supplies RGBA frames without using scap.
+#[cfg(target_env = "ohos")]
+pub(crate) type PlatformScreenCaptureFrame = image::RgbaImage;
 #[cfg(all(target_os = "macos", feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame =
     objc2_core_foundation::CFRetained<objc2_core_video::CVImageBuffer>;
@@ -1326,6 +1331,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn request_decorations(&self, _decorations: WindowDecorations) {}
     fn show_window_menu(&self, _position: Point<Pixels>) {}
+    /// Opens a native application menu at content-local logical coordinates.
+    /// A missing name opens all application menus. Returns false if unsupported.
+    fn show_app_menu(&self, _position: Point<Pixels>, _menu_name: Option<&str>) -> bool {
+        false
+    }
     fn start_window_move(&self) {}
     fn can_start_external_drag(&self) -> bool {
         false
@@ -2056,6 +2066,13 @@ impl PlatformInputHandler {
             .flatten()
     }
 
+    pub fn text_input_context(&mut self, max_utf16: usize) -> Option<TextInputContext> {
+        self.cx
+            .update(|window, cx| self.handler.text_input_context(max_utf16, window, cx))
+            .ok()
+            .flatten()
+    }
+
     pub fn replace_text_in_range(&mut self, replacement_range: Option<Range<usize>>, text: &str) {
         self.cx
             .update(|window, cx| {
@@ -2279,6 +2296,15 @@ pub struct UTF16Selection {
     pub reversed: bool,
 }
 
+/// Read-only surrounding text for controls without an editable document.
+#[derive(Debug)]
+pub struct TextInputContext {
+    /// Text around the input cursor, independent of document replacement ranges.
+    pub text: String,
+    /// Selection expressed as UTF-16 offsets within `text`.
+    pub selection: UTF16Selection,
+}
+
 /// GPUI's interface for native text input, IME composition, and selection.
 /// Platform backends translate their native text protocols into these operations.
 ///
@@ -2312,6 +2338,21 @@ pub trait InputHandler: 'static {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<String>;
+
+    /// Provide surrounding text when [`Self::text_for_range`] is unavailable.
+    ///
+    /// This allows controls to report text owned by another process without
+    /// supporting arbitrary document replacement. The selection belongs only to
+    /// this snapshot; platform deletion must continue to use the control's key
+    /// handling. Return `None` when the context exceeds `max_utf16`.
+    fn text_input_context(
+        &mut self,
+        _max_utf16: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<TextInputContext> {
+        None
+    }
 
     /// Replace the text in the given document range with the given text
     /// Corresponds to [insertText(_:replacementRange:)](https://developer.apple.com/documentation/appkit/nstextinputclient/1438258-inserttext)
