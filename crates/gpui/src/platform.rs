@@ -2066,13 +2066,6 @@ impl PlatformInputHandler {
             .flatten()
     }
 
-    pub fn text_input_context(&mut self, max_utf16: usize) -> Option<TextInputContext> {
-        self.cx
-            .update(|window, cx| self.handler.text_input_context(max_utf16, window, cx))
-            .ok()
-            .flatten()
-    }
-
     pub fn replace_text_in_range(&mut self, replacement_range: Option<Range<usize>>, text: &str) {
         self.cx
             .update(|window, cx| {
@@ -2296,15 +2289,6 @@ pub struct UTF16Selection {
     pub reversed: bool,
 }
 
-/// Read-only surrounding text for controls without an editable document.
-#[derive(Debug)]
-pub struct TextInputContext {
-    /// Text around the input cursor, independent of document replacement ranges.
-    pub text: String,
-    /// Selection expressed as UTF-16 offsets within `text`.
-    pub selection: UTF16Selection,
-}
-
 /// GPUI's interface for native text input, IME composition, and selection.
 /// Platform backends translate their native text protocols into these operations.
 ///
@@ -2338,21 +2322,6 @@ pub trait InputHandler: 'static {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<String>;
-
-    /// Provide surrounding text when [`Self::text_for_range`] is unavailable.
-    ///
-    /// This allows controls to report text owned by another process without
-    /// supporting arbitrary document replacement. The selection belongs only to
-    /// this snapshot; platform deletion must continue to use the control's key
-    /// handling. Return `None` when the context exceeds `max_utf16`.
-    fn text_input_context(
-        &mut self,
-        _max_utf16: usize,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Option<TextInputContext> {
-        None
-    }
 
     /// Replace the text in the given document range with the given text
     /// Corresponds to [insertText(_:replacementRange:)](https://developer.apple.com/documentation/appkit/nstextinputclient/1438258-inserttext)
