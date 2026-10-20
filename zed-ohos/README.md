@@ -15,9 +15,9 @@ Initialize the single runtime source tree from the repository root:
 git submodule update --init --recursive
 ```
 
-`../vendor/gpui-ohos` is pinned to `f7bd7509ed9b96370991d6e29a6d51f9edebb53e`.
+`../vendor/gpui-ohos` is pinned to `926312228125849d677b7dc911279f6bcf1b83ce`.
 Its nested Ability submodule is pinned to
-`84c16b88f0957c71e234f383ff7ff198bfcdf5ea`; that runtime pins IME binding
+`05ce9195ea66876dc64a9481a76f03abb2ea20db`; that runtime pins IME binding
 `842f4d4105b6c34a7c108d29c88d17cb496ed912`.
 Rust and ArkTS both consume this same Ability directory. Do not copy the runtime
 into the application or substitute a registry package on only one side.
