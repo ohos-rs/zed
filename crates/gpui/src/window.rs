@@ -6838,7 +6838,13 @@ impl Window {
         let receiver = match &prompt_builder {
             PromptBuilder::Default => self
                 .platform_window
-                .prompt(level, message, detail, &answers)
+                .prompt_with_style(
+                    level,
+                    message,
+                    detail,
+                    &answers,
+                    cx.native_prompt_style.as_ref(),
+                )
                 .unwrap_or_else(|| {
                     self.build_custom_prompt(&prompt_builder, level, message, detail, &answers, cx)
                 }),

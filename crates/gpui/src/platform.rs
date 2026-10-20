@@ -45,7 +45,7 @@ use crate::{
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
     LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Rgba, Scene, ShapedGlyph,
     ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
     hash, point, px, size,
 };
@@ -1245,6 +1245,18 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         detail: Option<&str>,
         answers: &[PromptButton],
     ) -> Option<oneshot::Receiver<usize>>;
+    /// Present a native prompt using application colors when supported.
+    /// Backends without color customization retain their system prompt.
+    fn prompt_with_style(
+        &self,
+        level: PromptLevel,
+        message: &str,
+        detail: Option<&str>,
+        answers: &[PromptButton],
+        _style: Option<&PromptStyle>,
+    ) -> Option<oneshot::Receiver<usize>> {
+        self.prompt(level, message, detail, answers)
+    }
     fn activate(&self);
     /// Requests that the operating system draw attention to this window.
     fn request_attention(&self) {}
@@ -2899,6 +2911,25 @@ pub enum PromptLevel {
 
     /// A prompt that is shown when a critical problem has occurred
     Critical,
+}
+
+/// Semantic colors for platform-native prompts. Backends may adjust colors for readability.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PromptStyle {
+    /// Dialog surface, composited over the platform's opaque background when transparent.
+    pub background: Rgba,
+    /// Title and secondary button text.
+    pub foreground: Rgba,
+    /// Description text.
+    pub muted_foreground: Rgba,
+    /// Default action background.
+    pub primary: Rgba,
+    /// Default action text.
+    pub primary_foreground: Rgba,
+    /// Dialog and secondary button outlines.
+    pub border: Rgba,
+    /// Keyboard focus indicator.
+    pub focus: Rgba,
 }
 
 /// Prompt Button
