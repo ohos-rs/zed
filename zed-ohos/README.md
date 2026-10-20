@@ -15,7 +15,7 @@ Initialize the single runtime source tree from the repository root:
 git submodule update --init --recursive
 ```
 
-`../vendor/gpui-ohos` is pinned to `a50bfec74e4d970a801fa49746ef80470c314848`.
+`../vendor/gpui-ohos` is pinned to `f7bd7509ed9b96370991d6e29a6d51f9edebb53e`.
 Its nested Ability submodule is pinned to
 `84c16b88f0957c71e234f383ff7ff198bfcdf5ea`; that runtime pins IME binding
 `842f4d4105b6c34a7c108d29c88d17cb496ed912`.
@@ -61,6 +61,8 @@ The app disables the runtime's extra menu bar and shortcut dispatcher.
 Native confirmations receive the active Zed theme's surface, text, accent, border
 and focus colors. The runtime composites alpha and repairs unreadable color
 pairs; applications which omit prompt appearance keep system colors.
+Theme selection uses the system appearance captured before previewing, so native
+chrome updates do not undo the selected theme.
 
 Zed retains its existing asynchronous save confirmation workflow. Cancelling or
 failing a close leaves the window available for another request.

@@ -400,7 +400,8 @@ impl PickerDelegate for ThemeSelectorDelegate {
 
         let theme_name: Arc<str> = self.new_theme.name.as_str().into();
         let theme_appearance = self.new_theme.appearance;
-        let system_appearance = SystemAppearance::global(cx).0;
+        // Native window chrome can follow the preview and change the reported appearance.
+        let system_appearance = self.original_system_appearance;
 
         telemetry::event!("Settings Changed", setting = "theme", value = theme_name);
 
@@ -667,6 +668,87 @@ mod tests {
         cx: &mut VisualTestContext,
     ) -> String {
         picker.read_with(cx, |picker, _| picker.delegate.new_theme.name.to_string())
+    }
+
+    async fn confirm_theme_after_native_preview(
+        cx: &mut TestAppContext,
+        initial_appearance: Appearance,
+        selected_theme: &str,
+        expected_mode: &str,
+    ) {
+        let app_state = setup_test(cx).await;
+        let update = cx.update(|cx| {
+            *SystemAppearance::global_mut(cx) = SystemAppearance(initial_appearance);
+            settings::update_settings_file_with_completion(
+                app_state.fs.clone(),
+                cx,
+                |settings, _| {
+                    settings.theme.theme = Some(settings::ThemeSelection::Dynamic {
+                        mode: ThemeAppearanceMode::System,
+                        light: ThemeName("Test Light".into()),
+                        dark: ThemeName("Test Dark A".into()),
+                    });
+                },
+            )
+        });
+        update
+            .await
+            .expect("settings update response")
+            .expect("initial settings write");
+        cx.update(theme_settings::reload_theme);
+
+        let project = Project::test(app_state.fs.clone(), [path!("/test").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        cx.run_until_parked();
+        workspace.update_in(cx, |_, _, cx| {
+            *SystemAppearance::global_mut(cx) = SystemAppearance(initial_appearance);
+            theme_settings::reload_theme(cx);
+        });
+        let picker = open_theme_selector(&workspace, cx);
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.delegate.original_system_appearance),
+            initial_appearance,
+        );
+        let target_index = picker.read_with(cx, |picker, _| {
+            picker
+                .delegate
+                .matches
+                .iter()
+                .position(|theme| theme.string == selected_theme)
+                .expect("registered theme should be available")
+        });
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_selected_index(target_index, None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(previewed_theme_name(&picker, cx), selected_theme);
+
+        picker.update_in(cx, |picker, window, cx| {
+            *SystemAppearance::global_mut(cx) =
+                SystemAppearance(picker.delegate.new_theme.appearance);
+            picker.delegate.confirm(false, window, cx);
+        });
+        cx.run_until_parked();
+        let text = SettingsStore::load_settings(&app_state.fs)
+            .await
+            .expect("saved settings");
+        let settings: serde_json::Value =
+            settings::parse_json_with_comments(&text).expect("valid settings");
+        assert_eq!(settings["theme"]["mode"], expected_mode);
+        assert_eq!(settings["theme"][expected_mode], selected_theme);
+    }
+
+    #[gpui::test]
+    async fn test_confirm_dark_theme_after_native_preview(cx: &mut TestAppContext) {
+        confirm_theme_after_native_preview(cx, Appearance::Light, "Test Dark A", "dark").await;
+    }
+
+    #[gpui::test]
+    async fn test_confirm_light_theme_after_native_preview(cx: &mut TestAppContext) {
+        confirm_theme_after_native_preview(cx, Appearance::Dark, "Test Light", "light").await;
     }
 
     #[gpui::test]
