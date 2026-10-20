@@ -1,0 +1,73 @@
+[package]
+name = "zed-ohos"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "zed"
+path = "src/zed_ohos.rs"
+crate-type = ["cdylib"]
+doctest = false
+test = false
+
+[dependencies]
+anyhow = "1"
+audio = { path = "../crates/audio" }
+futures = "0.3"
+gpui-ohos = { path = "../vendor/gpui-ohos", default-features = false, features = ["gles"] }
+log = "0.4"
+napi-derive-ohos = "=1.2.0"
+napi-ohos = "=1.2.0"
+ohos-hilog-binding = { version = "*", features = ["log"] }
+openharmony-ability = { version = "=1.0.0-beta.3", path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/ability" }
+openharmony-ability-derive = { version = "=1.0.0-beta.3", path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/derive" }
+openharmony-ability-plugin-permission = { version = "=1.0.0-beta.3", path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-permission" }
+zed_core = { package = "zed", path = "../crates/zed" }
+
+[build-dependencies]
+napi-build-ohos = "=1.2.0"
+
+[workspace]
+members = ["."]
+resolver = "2"
+
+[profile.release]
+debug = "limited"
+lto = "thin"
+codegen-units = 1
+
+[profile.release.package]
+zed = { codegen-units = 16 }
+
+[patch."https://github.com/ohos-rs/zed"]
+gpui = { path = "../crates/gpui" }
+
+[patch.crates-io]
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+cpal = { git = "https://github.com/RustAudio/cpal", rev = "e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7" }
+# Unify `tree_sitter_language::LanguageFn` between crates.io grammar crates and
+# the git tree-sitter above; two instances of the crate would make grammar
+# constants type-incompatible with `tree_sitter::Language`.
+tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+livekit = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "0a1c519cfce9b365229026b55de9b9dbdb6fed3c" }
+libwebrtc = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "0a1c519cfce9b365229026b55de9b9dbdb6fed3c" }
+notify = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+notify-types = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "0a1c519cfce9b365229026b55de9b9dbdb6fed3c" }
+
+# corgi runs build.rs/proc-macros in a sandbox with no write access outside the
+# action's own OUT_DIR. Upstream `scratch` bakes its build-time OUT_DIR in via
+# `env!` and hands every crate one shared directory, which the sandbox can't
+# grant and a content-addressed build can't share. This patch reads OUT_DIR at
+# runtime, so each build script gets a private, writable dir in its own entry —
+# where cxx-build writes its shared cxxbridge headers. Kept local rather than a
+# cxx git fork so Windows cargo builds are unaffected (a git checkout of cxx
+# needs symlink support that Windows CI lacks). webrtc-sys is self-contained, so
+# per-crate scratch dirs are sufficient. Upstream issue:
+# https://github.com/dtolnay/cxx/issues/1752
+scratch = { path = "../tooling/corgi/patches/scratch" }

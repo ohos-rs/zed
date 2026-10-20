@@ -2,10 +2,12 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use collections::HashMap;
+#[cfg(not(target_env = "ohos"))]
 use serde::Deserialize;
 
 use crate::shell::ShellKind;
 
+#[cfg(not(target_env = "ohos"))]
 fn parse_env_map_from_noisy_output(output: &str) -> Result<collections::HashMap<String, String>> {
     for (position, _) in output.match_indices('{') {
         let candidate = &output[position..];
@@ -15,6 +17,25 @@ fn parse_env_map_from_noisy_output(output: &str) -> Result<collections::HashMap<
         }
     }
     anyhow::bail!("Failed to find JSON in shell output: {output}")
+}
+
+#[cfg(any(target_env = "ohos", test))]
+fn parse_null_delimited_env(output: &str) -> Result<collections::HashMap<String, String>> {
+    anyhow::ensure!(
+        output.ends_with('\0'),
+        "Incomplete shell environment output"
+    );
+    output
+        .trim_end_matches('\0')
+        .split('\0')
+        .map(|entry| {
+            let (key, value) = entry
+                .split_once('=')
+                .context("Invalid shell environment entry")?;
+            anyhow::ensure!(!key.is_empty(), "Empty shell environment variable name");
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect()
 }
 
 pub fn print_env() {
@@ -49,7 +70,11 @@ fn parse_env_output(
     successful_capture_warning: impl FnOnce() -> String,
     failed_capture_error: impl FnOnce() -> String,
 ) -> Result<collections::HashMap<String, String>> {
-    match parse_env_map_from_noisy_output(env_output) {
+    #[cfg(target_env = "ohos")]
+    let parsed = parse_null_delimited_env(env_output);
+    #[cfg(not(target_env = "ohos"))]
+    let parsed = parse_env_map_from_noisy_output(env_output);
+    match parsed {
         Ok(env_map) => {
             if !status.success() {
                 log::warn!("{}", successful_capture_warning());
@@ -59,13 +84,13 @@ fn parse_env_output(
         Err(parse_error) => {
             if !status.success() {
                 anyhow::bail!(
-                    "{}. Failed to deserialize environment variables from json: {parse_error}. output: {env_output}",
+                    "{}. Failed to deserialize environment variables: {parse_error}. output: {env_output}",
                     failed_capture_error(),
                 );
             }
 
             anyhow::bail!(
-                "Failed to deserialize environment variables from json: {parse_error}. output: {env_output}"
+                "Failed to deserialize environment variables: {parse_error}. output: {env_output}"
             );
         }
     }
@@ -82,10 +107,19 @@ async fn capture_unix(
     use crate::command::new_std_command;
 
     let shell_kind = ShellKind::new(shell_path, false);
-    let quoted_zed_path = super::get_shell_safe_zed_path(shell_kind)?;
+    #[cfg(not(target_env = "ohos"))]
+    let print_environment = format!("{} --printenv", super::get_shell_safe_zed_path(shell_kind)?);
+    // Zed is a library inside AppSpawn on OHOS; current_exe cannot run `zed --printenv`.
+    #[cfg(target_env = "ohos")]
+    let print_environment = "/system/bin/env -0";
 
     let mut command_string = String::new();
     let mut command = new_std_command(shell_path);
+    #[cfg(target_env = "ohos")]
+    {
+        crate::shell::configure_ohos_command(&mut command);
+        command.current_dir(directory);
+    }
     command.args(args);
     // In some shells, file descriptors greater than 2 cannot be used in interactive mode,
     // so file descriptor 0 (stdin) is used instead. This impacts zsh, old bash; perhaps others.
@@ -143,7 +177,7 @@ async fn capture_unix(
     if let Some(prefix) = shell_kind.command_prefix() {
         command_string.push(prefix);
     }
-    command_string.push_str(&format!("{} --printenv {}", quoted_zed_path, redir));
+    command_string.push_str(&format!("{} {}", print_environment, redir));
 
     if let ShellKind::Nushell = shell_kind {
         command_string.push_str("; exit");
@@ -310,6 +344,21 @@ mod tests {
     use super::*;
     use crate::path;
 
+    #[test]
+    fn parse_null_environment_preserves_multiline_and_equals() -> Result<()> {
+        let environment = parse_null_delimited_env(
+            "HOME=/data/storage/el2/base/files\0VALUE=line one\nline=two\0EMPTY=\0",
+        )?;
+        assert_eq!(
+            environment.get("VALUE").map(String::as_str),
+            Some("line one\nline=two")
+        );
+        assert_eq!(environment.get("EMPTY").map(String::as_str), Some(""));
+        assert!(parse_null_delimited_env("HOME=/truncated").is_err());
+        assert!(parse_null_delimited_env("missing-value\0").is_err());
+        Ok(())
+    }
+
     #[cfg(unix)]
     fn exit_status(code: i32) -> ExitStatus {
         use std::os::unix::process::ExitStatusExt;
@@ -326,11 +375,16 @@ mod tests {
 
     #[test]
     fn parse_env_output_accepts_valid_env_when_shell_exits_nonzero() {
-        let env_json = serde_json::json!({
-            "PATH": path!("/usr/bin"),
-            "SHELL": path!("/bin/zsh"),
-        });
-        let env_output = format!("shell startup noise\n{env_json}\nshell shutdown noise");
+        #[cfg(not(target_env = "ohos"))]
+        let env_output = {
+            let env_json = serde_json::json!({
+                "PATH": path!("/usr/bin"),
+                "SHELL": path!("/bin/zsh"),
+            });
+            format!("shell startup noise\n{env_json}\nshell shutdown noise")
+        };
+        #[cfg(target_env = "ohos")]
+        let env_output = "PATH=/usr/bin\0SHELL=/bin/zsh\0";
 
         let env_map = parse_env_output(
             &env_output,

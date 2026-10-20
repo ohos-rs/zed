@@ -1,0 +1,8 @@
+/.hvigor/
+/target/
+/dist/
+/ohos/.hvigor/
+/ohos/.build/
+/ohos/**/build/
+/ohos/**/oh_modules/
+/ohos/signing/

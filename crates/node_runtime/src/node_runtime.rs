@@ -1,5 +1,7 @@
 use anyhow::{Context as _, Result, anyhow, bail};
+#[cfg(not(target_env = "ohos"))]
 use async_compression::futures::bufread::GzipDecoder;
+#[cfg(not(target_env = "ohos"))]
 use async_tar::Archive;
 use chrono::{DateTime, Utc};
 use futures::{AsyncReadExt, FutureExt as _, channel::oneshot, future::Shared};
@@ -7,13 +9,14 @@ use http_client::{Host, HttpClient, Url};
 use log::Level;
 use semver::{Version, VersionReq};
 use serde::Deserialize;
+#[cfg(not(target_env = "ohos"))]
 use smol::io::BufReader;
 use smol::{fs, lock::Mutex};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::{
-    env::{self, consts},
-    ffi::OsString,
+    env,
+    ffi::{OsStr, OsString},
     io,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
@@ -21,7 +24,8 @@ use std::{
     sync::Arc,
 };
 use util::ResultExt;
-use util::archive::extract_zip;
+#[cfg(not(target_env = "ohos"))]
+use {std::env::consts, util::archive::extract_zip};
 
 const NODE_CA_CERTS_ENV_VAR: &str = "NODE_EXTRA_CA_CERTS";
 
@@ -174,8 +178,8 @@ impl NodeRuntime {
                     // and/or have shared tracking of when internet is available.
                     Box::new(UnavailableNodeRuntime {
                         error_message: format!(
-                            "failure while downloading and/or installing Zed managed Node.js, \
-                            restart Zed to retry: {}",
+                            "failure while initializing Zed managed Node.js, \
+                            restart Zed to retry: {:#}",
                             err
                         )
                         .into(),
@@ -321,9 +325,12 @@ impl NodeRuntime {
             .map(|(name, version)| format!("{name}@{version}"))
             .collect();
 
+        // OHOS applications cannot create symlinks. Zed launches these package scripts directly,
+        // so installing their node_modules/.bin links is unnecessary.
         let arguments: Vec<_> = packages
             .iter()
             .map(|p| p.as_str())
+            .chain(cfg!(target_env = "ohos").then_some("--no-bin-links"))
             .chain([
                 "--no-package-lock",
                 "--save-exact",
@@ -413,6 +420,7 @@ fn should_install_npm_package_version(
     }
 }
 
+#[cfg(not(target_env = "ohos"))]
 enum ArchiveType {
     TarGz,
     Zip,
@@ -601,21 +609,54 @@ trait NodeRuntimeTrait: Send + Sync {
 #[derive(Clone)]
 struct ManagedNodeRuntime {
     installation_path: PathBuf,
+    configuration_path: PathBuf,
 }
 
 impl ManagedNodeRuntime {
-    const VERSION: &str = "v24.11.0";
+    #[cfg(not(target_env = "ohos"))]
+    const VERSION: &str = "v24.21.0";
 
     #[cfg(not(windows))]
     const NODE_PATH: &str = "bin/node";
     #[cfg(windows)]
     const NODE_PATH: &str = "node.exe";
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_env = "ohos")))]
     const NPM_PATH: &str = "bin/npm";
+    #[cfg(target_env = "ohos")]
+    const NPM_PATH: &str = "lib/node_modules/npm/bin/npm-cli.js";
     #[cfg(windows)]
     const NPM_PATH: &str = "node_modules/npm/bin/npm-cli.js";
 
+    #[cfg(target_env = "ohos")]
+    async fn install_if_needed(_http: &Arc<dyn HttpClient>) -> Result<Self> {
+        // OHOS signs executable code at package installation. Downloading an ELF into app data
+        // cannot replace the HNP shipped by the application, even if its target is OHOS.
+        let node_binary = fs::canonicalize("/data/service/hnp/bin/zed-node")
+            .await
+            .context("The OHOS application has no packaged Node.js runtime. Install a Zed HAP containing the Node HNP, or configure node.path and node.npm_path")?;
+        let installation_path = node_binary
+            .parent()
+            .and_then(Path::parent)
+            .context("The packaged Node.js executable has no installation directory")?
+            .to_path_buf();
+        let configuration_path = paths::data_dir().join("node").join("ohos");
+        fs::create_dir_all(configuration_path.join("cache")).await?;
+        fs::write(configuration_path.join("blank_user_npmrc"), []).await?;
+        fs::write(configuration_path.join("blank_global_npmrc"), []).await?;
+
+        let runtime = Self {
+            installation_path,
+            configuration_path,
+        };
+        runtime
+            .run_npm_subcommand(None, None, "--version", &[])
+            .await
+            .context("The packaged OHOS Node.js runtime failed its npm startup check")?;
+        Ok(runtime)
+    }
+
+    #[cfg(not(target_env = "ohos"))]
     async fn install_if_needed(http: &Arc<dyn HttpClient>) -> Result<Self> {
         log::info!("Node runtime install_if_needed");
 
@@ -726,6 +767,7 @@ impl ManagedNodeRuntime {
         _ = fs::write(node_dir.join("blank_global_npmrc"), []).await;
 
         anyhow::Ok(ManagedNodeRuntime {
+            configuration_path: node_dir.clone(),
             installation_path: node_dir,
         })
     }
@@ -824,9 +866,9 @@ impl NodeRuntimeTrait for ManagedNodeRuntime {
         let command_args = build_npm_command_args(
             Some(&npm_file),
             prefix_dir,
-            &self.installation_path.join("cache"),
-            Some(&self.installation_path.join("blank_user_npmrc")),
-            Some(&self.installation_path.join("blank_global_npmrc")),
+            &self.configuration_path.join("cache"),
+            Some(&self.configuration_path.join("blank_user_npmrc")),
+            Some(&self.configuration_path.join("blank_global_npmrc")),
             proxy,
             subcommand,
             args,
@@ -849,6 +891,173 @@ impl NodeRuntimeTrait for ManagedNodeRuntime {
     }
 }
 
+/// A system Node.js executable whose version has been checked.
+///
+/// Discovery does not require npm, initialize a cache, or download a runtime.
+#[derive(Debug, Clone)]
+pub struct SystemNode {
+    path: PathBuf,
+    version: Version,
+}
+
+/// A failure to locate or validate a system Node.js executable.
+#[derive(Debug, thiserror::Error)]
+pub enum NodeDiscoveryError {
+    #[error("Could not read the current directory while looking for Node.js: {0}")]
+    CurrentDirectory(#[source] io::Error),
+    #[error(
+        "Node.js executable {path:?} was not found. Install Node.js {minimum} or newer, or configure its executable path.",
+        minimum = SystemNode::MIN_VERSION,
+    )]
+    NotFound {
+        path: PathBuf,
+        #[source]
+        source: which::Error,
+    },
+    #[error(
+        "Could not run Node.js at {path:?}: {source}. Check that the configured executable can run."
+    )]
+    Probe {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "Node.js at {path:?} failed its version check ({status}). Check the Node.js installation.\nstdout: {stdout}\nstderr: {stderr}",
+        status = .output.status,
+        stdout = String::from_utf8_lossy(&.output.stdout),
+        stderr = String::from_utf8_lossy(&.output.stderr),
+    )]
+    UnsuccessfulExit { path: PathBuf, output: Output },
+    #[error(
+        "Node.js at {path:?} reported an invalid version: {output:?}. Configure a Node.js {minimum} or newer executable.",
+        minimum = SystemNode::MIN_VERSION,
+    )]
+    InvalidVersion {
+        path: PathBuf,
+        output: String,
+        #[source]
+        source: semver::Error,
+    },
+    #[error(
+        "Node.js at {path:?} is too old ({version}). Install Node.js {minimum} or newer, or configure a newer executable.",
+        minimum = SystemNode::MIN_VERSION,
+    )]
+    TooOld { path: PathBuf, version: Version },
+}
+
+impl SystemNode {
+    const MIN_VERSION: Version = Version::new(22, 0, 0);
+
+    /// Finds and validates Node.js using an explicit executable or search path.
+    ///
+    /// An explicit executable takes precedence and never falls back to another
+    /// candidate on failure. Otherwise the first executable named `node` in
+    /// `search_path` is checked, preserving PATH order even if it is too old.
+    /// `None` disables PATH lookup; it does not read the process's PATH.
+    ///
+    /// A configured basename is also looked up in `search_path`; use `./name`
+    /// to select one in the current directory. Relative paths containing
+    /// separators are resolved against that directory. On Windows, lookup
+    /// honors PATHEXT, including batch-file wrappers.
+    ///
+    /// The caller must finish loading its login-shell environment before calling
+    /// this method. The version probe inherits that environment, with PATH
+    /// replaced by `search_path` when supplied. Discovery does not launch a login
+    /// shell to obtain the environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure if lookup or execution fails, the version cannot
+    /// be parsed, or the executable reports a version older than 22.0.0.
+    pub async fn discover(
+        configured_path: Option<PathBuf>,
+        search_path: Option<OsString>,
+    ) -> std::result::Result<Self, NodeDiscoveryError> {
+        let path = smol::unblock({
+            let search_path = search_path.clone();
+            move || {
+                find_node_path(
+                    configured_path.as_deref(),
+                    search_path.as_deref(),
+                    Path::new("."),
+                )
+            }
+        })
+        .await?;
+        let mut command = util::command::new_command(&path);
+        command.arg("--version").kill_on_drop(true);
+        if let Some(search_path) = search_path {
+            command.env("PATH", search_path);
+        }
+        let output = command
+            .output()
+            .await
+            .map_err(|source| NodeDiscoveryError::Probe {
+                path: path.clone(),
+                source,
+            })?;
+        let version = check_node_version(&path, output)?;
+        Ok(Self { path, version })
+    }
+
+    /// Returns the absolute executable path without resolving symlinks.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the version reported by the executable.
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+}
+
+fn find_node_path(
+    configured_path: Option<&Path>,
+    search_path: Option<&OsStr>,
+    directory: &Path,
+) -> std::result::Result<PathBuf, NodeDiscoveryError> {
+    let path = configured_path.unwrap_or_else(|| Path::new("node"));
+    let path = which::which_in(path, search_path, directory).map_err(|source| {
+        NodeDiscoveryError::NotFound {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    // The cwd may have been deleted even when Node's absolute path still works.
+    // Only relative results need it, but those must be anchored before launch
+    // so the command cannot search PATH a second time.
+    std::path::absolute(directory.join(path)).map_err(NodeDiscoveryError::CurrentDirectory)
+}
+
+fn check_node_version(
+    path: &Path,
+    output: Output,
+) -> std::result::Result<Version, NodeDiscoveryError> {
+    if !output.status.success() {
+        return Err(NodeDiscoveryError::UnsuccessfulExit {
+            path: path.to_path_buf(),
+            output,
+        });
+    }
+    let version_string = String::from_utf8_lossy(&output.stdout);
+    let version =
+        Version::parse(version_string.trim().trim_start_matches('v')).map_err(|source| {
+            NodeDiscoveryError::InvalidVersion {
+                path: path.to_path_buf(),
+                output: version_string.into_owned(),
+                source,
+            }
+        })?;
+    if version < SystemNode::MIN_VERSION {
+        return Err(NodeDiscoveryError::TooOld {
+            path: path.to_path_buf(),
+            version,
+        });
+    }
+    Ok(version)
+}
+
 #[derive(Debug, Clone)]
 pub struct SystemNodeRuntime {
     node: PathBuf,
@@ -857,31 +1066,10 @@ pub struct SystemNodeRuntime {
 }
 
 impl SystemNodeRuntime {
-    const MIN_VERSION: semver::Version = Version::new(22, 0, 0);
     async fn new(node: PathBuf, npm: PathBuf) -> Result<Self> {
-        let output = util::command::new_command(&node)
-            .arg("--version")
-            .output()
-            .await
-            .with_context(|| format!("running node from {:?}", node))?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "failed to run node --version. stdout: {}, stderr: {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-        }
-        let version_str = String::from_utf8_lossy(&output.stdout);
-        let version = semver::Version::parse(version_str.trim().trim_start_matches('v'))?;
-        if version < Self::MIN_VERSION {
-            anyhow::bail!(
-                "node at {} is too old. want: {}, got: {}",
-                node.to_string_lossy(),
-                Self::MIN_VERSION,
-                version
-            )
-        }
-
+        let node = SystemNode::discover(Some(node), env::var_os("PATH"))
+            .await?
+            .path;
         let scratch_dir = paths::data_dir().join("node");
         fs::create_dir(&scratch_dir).await.ok();
         _ = fs::remove_dir_all(scratch_dir.join("cache")).await;
@@ -1190,16 +1378,77 @@ pub fn npm_command_env(node_binary: &Path) -> HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        env, fs,
+        path::{Path, PathBuf},
+        process::{ExitStatus, Output},
+    };
 
     use anyhow::{Result, bail};
     use http_client::Url;
     use semver::{Version, VersionReq};
 
     use super::{
-        NpmInfo, VersionStrategy, build_npm_command_args, deserialize_npm_info_from_response,
-        proxy_argument, select_npm_package_version, should_install_npm_package_version,
+        NodeDiscoveryError, NpmInfo, VersionStrategy, build_npm_command_args, check_node_version,
+        deserialize_npm_info_from_response, find_node_path, proxy_argument,
+        select_npm_package_version, should_install_npm_package_version,
     };
+
+    #[test]
+    fn test_node_lookup_distinguishes_basenames_and_relative_paths() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let binary_directory = directory.path().join("bin");
+        fs::create_dir(&binary_directory)?;
+        let filename = format!("node{}", env::consts::EXE_SUFFIX);
+        let node = binary_directory.join(&filename);
+        fs::write(&node, b"not executed by lookup tests")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&node, fs::Permissions::from_mode(0o755))?;
+        }
+        for (configured_path, search_path) in [
+            (PathBuf::from(&filename), Some(binary_directory.as_os_str())),
+            (Path::new("bin").join(&filename), None),
+        ] {
+            assert_eq!(
+                find_node_path(Some(&configured_path), search_path, directory.path())?,
+                node
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_node_version_validation() -> Result<()> {
+        let path = Path::new("node");
+        for (stdout, expected) in [
+            ("v22.0.0\n", Version::new(22, 0, 0)),
+            (" \t22.1.0\r\n", Version::new(22, 1, 0)),
+        ] {
+            assert_eq!(check_node_version(path, node_output(stdout))?, expected);
+        }
+        for version in ["21.7.3", "22.0.0-rc.1"] {
+            let error = check_node_version(path, node_output(&format!("v{version}\n")))
+                .expect_err("unsupported version");
+            assert!(
+                matches!(&error, NodeDiscoveryError::TooOld { path: actual_path, version: actual_version }
+                    if actual_path == path && actual_version == &Version::parse(version)?)
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("Install Node.js 22.0.0 or newer")
+            );
+        }
+        let stdout = "not node\n";
+        assert!(matches!(
+            check_node_version(path, node_output(stdout)),
+            Err(NodeDiscoveryError::InvalidVersion { path: actual_path, output, .. })
+                if actual_path == path && output == stdout
+        ));
+        Ok(())
+    }
 
     // Map localhost to 127.0.0.1
     // NodeRuntime without environment information can not parse `localhost` correctly.
@@ -1657,5 +1906,17 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    fn node_output(stdout: &str) -> Output {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        Output {
+            status: ExitStatus::from_raw(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
     }
 }

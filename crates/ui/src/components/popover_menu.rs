@@ -137,6 +137,7 @@ pub struct PopoverMenu<M: ManagedView> {
         >,
     >,
     menu_builder: Option<Rc<dyn Fn(&mut Window, &mut App) -> Option<Entity<M>> + 'static>>,
+    native_app_menu: Option<Option<SharedString>>,
     anchor: Anchor,
     attach: Option<Anchor>,
     offset: Option<Point<Pixels>>,
@@ -152,6 +153,7 @@ impl<M: ManagedView> PopoverMenu<M> {
             id: id.into(),
             child_builder: None,
             menu_builder: None,
+            native_app_menu: None,
             anchor: Anchor::TopLeft,
             attach: None,
             offset: None,
@@ -171,6 +173,13 @@ impl<M: ManagedView> PopoverMenu<M> {
         f: impl Fn(&mut Window, &mut App) -> Option<Entity<M>> + 'static,
     ) -> Self {
         self.menu_builder = Some(Rc::new(f));
+        self
+    }
+
+    /// Uses the native application menu when supported, falling back to the menu builder.
+    /// A missing name opens all application menus.
+    pub fn native_app_menu(mut self, menu_name: Option<SharedString>) -> Self {
+        self.native_app_menu = Some(menu_name);
         self
     }
 
@@ -369,6 +378,27 @@ impl<M: ManagedView> Element for PopoverMenu<M> {
             global_id.unwrap(),
             |element_state: Option<PopoverMenuElementState<M>>, window| {
                 let element_state = element_state.unwrap_or_default();
+                let menu_builder = self.menu_builder.clone().map(|builder| {
+                    let Some(menu_name) = self.native_app_menu.clone() else {
+                        return builder;
+                    };
+                    let position = element_state
+                        .child_bounds
+                        .map(|bounds| {
+                            bounds.corner(self.resolved_attach()) + self.resolved_offset(window)
+                        })
+                        .unwrap_or_else(|| window.mouse_position());
+                    Rc::new(move |window: &mut Window, cx: &mut App| {
+                        // Native popups retain the editor focus, so focus changes do not
+                        // clear a pending shortcut prefix as they do for a GPUI menu.
+                        window.clear_pending_keystrokes(cx);
+                        if window.show_app_menu(position, menu_name.as_deref()) {
+                            None
+                        } else {
+                            builder(window, cx)
+                        }
+                    }) as Rc<dyn Fn(&mut Window, &mut App) -> Option<Entity<M>>>
+                });
                 let mut menu_layout_id = None;
 
                 let menu_element = element_state.menu.borrow_mut().as_mut().map(|menu| {
@@ -390,11 +420,11 @@ impl<M: ManagedView> Element for PopoverMenu<M> {
                 });
 
                 let mut child_element = self.child_builder.take().map(|child_builder| {
-                    (child_builder)(element_state.menu.clone(), self.menu_builder.clone())
+                    (child_builder)(element_state.menu.clone(), menu_builder.clone())
                 });
 
                 if let Some(trigger_handle) = self.trigger_handle.take()
-                    && let Some(menu_builder) = self.menu_builder.clone()
+                    && let Some(menu_builder) = menu_builder
                 {
                     *trigger_handle.0.borrow_mut() = Some(PopoverMenuHandleState {
                         menu_builder,

@@ -1,4 +1,6 @@
+use anyhow::Context as _;
 use audio::{AudioSettings, CHANNEL_COUNT, DeviceId, RodioExt, SAMPLE_RATE};
+use futures::channel::oneshot;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Render, Size, Window, WindowBounds, WindowKind,
     WindowOptions, prelude::*, px,
@@ -29,6 +31,8 @@ pub struct AudioTestWindow {
     output_device_id: Option<DeviceId>,
     focus_handle: FocusHandle,
     _stop_playback: Option<Box<dyn Any + Send>>,
+    starting: Option<gpui::Task<()>>,
+    error: Option<gpui::SharedString>,
 }
 
 impl AudioTestWindow {
@@ -49,21 +53,43 @@ impl AudioTestWindow {
             output_device_id,
             focus_handle: cx.focus_handle(),
             _stop_playback: None,
+            starting: None,
+            error: None,
         }
     }
 
     fn toggle_testing(&mut self, cx: &mut Context<Self>) {
-        if let Some(_cb) = self._stop_playback.take() {
+        if self.starting.is_some() {
+            return;
+        }
+        self.error = None;
+        if self._stop_playback.take().is_some() {
             cx.notify();
             return;
         }
 
-        if let Some(cb) =
-            start_test_playback(self.input_device_id.clone(), self.output_device_id.clone()).ok()
-        {
-            self._stop_playback = Some(cb);
+        match start_test_playback(self.input_device_id.clone(), self.output_device_id.clone()) {
+            Ok((stop_playback, ready)) => {
+                self._stop_playback = Some(stop_playback);
+                self.starting = Some(cx.spawn(async move |this, cx| {
+                    let result = ready
+                        .await
+                        .context("Audio test worker stopped during startup")
+                        .and_then(|result| result);
+                    this.update(cx, |this, cx| {
+                        this.starting = None;
+                        if let Err(error) = result {
+                            log::error!("Audio test failed: {error:#}");
+                            this._stop_playback.take();
+                            this.error = Some(format!("{error:#}").into());
+                        }
+                        cx.notify();
+                    })
+                    .log_err();
+                }));
+            }
+            Err(error) => self.error = Some(format!("{error:#}").into()),
         }
-
         cx.notify();
     }
 }
@@ -71,40 +97,47 @@ impl AudioTestWindow {
 fn start_test_playback(
     input_device_id: Option<DeviceId>,
     output_device_id: Option<DeviceId>,
-) -> anyhow::Result<Box<dyn Any + Send>> {
+) -> anyhow::Result<(Box<dyn Any + Send>, oneshot::Receiver<anyhow::Result<()>>)> {
     let stop_signal = Arc::new(AtomicBool::new(false));
-
+    let (ready_sender, ready) = oneshot::channel();
     thread::Builder::new()
         .name("AudioTestPlayback".to_string())
         .spawn({
             let stop_signal = stop_signal.clone();
             move || {
-                let microphone = match open_test_microphone(input_device_id, stop_signal.clone()) {
-                    Ok(mic) => mic,
-                    Err(e) => {
-                        log::error!("Could not open microphone for audio test: {e}");
-                        return;
+                let result = (|| {
+                    let microphone = open_test_microphone(input_device_id, stop_signal.clone())
+                        .context("Could not open microphone for audio test")?;
+                    let output = audio::open_test_output(output_device_id)
+                        .context("Could not open output device for audio test")?;
+                    output.mixer().add(microphone);
+                    anyhow::Ok(output)
+                })();
+                match result {
+                    Ok(output) => {
+                        if ready_sender.send(Ok(())).is_err() {
+                            return;
+                        }
+                        while !stop_signal.load(Ordering::Relaxed) {
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        drop(output);
                     }
-                };
-
-                let Ok(output) = audio::open_test_output(output_device_id) else {
-                    log::error!("Could not open output device for audio test");
-                    return;
-                };
-
-                // let microphone = rx.recv().unwrap();
-                output.mixer().add(microphone);
-
-                // Keep thread (and output device) alive until stop signal
-                while !stop_signal.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(100));
+                    Err(error) => {
+                        if let Err(Err(error)) = ready_sender.send(Err(error)) {
+                            log::error!("Audio test closed during startup: {error:#}");
+                        }
+                    }
                 }
             }
         })?;
 
-    Ok(Box::new(util::defer(move || {
-        stop_signal.store(true, Ordering::Relaxed);
-    })))
+    Ok((
+        Box::new(util::defer(move || {
+            stop_signal.store(true, Ordering::Relaxed);
+        })),
+        ready,
+    ))
 }
 
 fn open_test_microphone(
@@ -131,7 +164,9 @@ fn open_test_microphone(
 impl Render for AudioTestWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_testing = self._stop_playback.is_some();
-        let button_text = if is_testing {
+        let button_text = if self.starting.is_some() {
+            "Starting…"
+        } else if is_testing {
             "Stop Testing"
         } else {
             "Start Testing"
@@ -231,8 +266,14 @@ impl Render for AudioTestWindow {
                 h_flex().w_full().justify_center().pt_4().child(
                     Button::new("test-audio-toggle", button_text)
                         .style(button_style)
+                        .disabled(self.starting.is_some())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_testing(cx))),
                 ),
+            )
+            .children(
+                self.error
+                    .clone()
+                    .map(|error| Label::new(error).color(ui::Color::Error)),
             );
 
         client_side_decorations(

@@ -1,0 +1,2 @@
+[env]
+OHOS_DEVICE_TYPE = { value = "desktop", force = false }

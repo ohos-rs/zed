@@ -44,7 +44,6 @@ use reqwest_client::ReqwestClient;
 
 use assets::Assets;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
-use parking_lot::Mutex;
 use project::{project_settings::ProjectSettings, trusted_worktrees};
 use recent_projects::{RemoteSettings, open_remote_project};
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
@@ -234,6 +233,53 @@ fn run_application(app: Application, on_finish_launching: impl FnOnce(&mut App) 
     app.run(on_finish_launching);
 }
 
+fn run_application_with_state<State: 'static>(
+    app: Application,
+    state: impl std::future::Future<Output = State> + 'static,
+    on_finish_launching: impl FnOnce(&mut App, State) + 'static,
+) {
+    #[cfg(target_env = "ohos")]
+    {
+        let executor = app.background_executor();
+        // Certificate discovery and embedded asset decompression can block the
+        // Ability thread. Start them while the platform prepares its GPU/surface.
+        let tls_prewarm = executor.spawn(async {
+            let started = Instant::now();
+            http_client_tls::tls_config();
+            log::info!("Initialized OHOS TLS verifier in {:?}", started.elapsed());
+        });
+        let embedded_fonts = executor.spawn({
+            let text_system = app.text_system();
+            let executor = executor.clone();
+            async move {
+                let started = Instant::now();
+                load_embedded_fonts(Arc::new(Assets), text_system, executor).await?;
+                log::info!("Loaded OHOS embedded fonts in {:?}", started.elapsed());
+                anyhow::Ok(())
+            }
+        });
+        run_application(app, move |cx| {
+            // Ability lifecycle callbacks must return before disk I/O or migrations finish.
+            cx.spawn(async move |cx| {
+                tls_prewarm.await;
+                if let Err(error) = embedded_fonts.await {
+                    fail_to_open_window_async(error.context("loading embedded fonts"), cx);
+                    return;
+                }
+                let state = state.await;
+                cx.update(|cx| on_finish_launching(cx, state));
+            })
+            .detach();
+        });
+    }
+
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let state = gpui::block_on(state);
+        run_application(app, move |cx| on_finish_launching(cx, state));
+    }
+}
+
 #[cfg(target_env = "ohos")]
 pub fn run_with_ohos_platform(platform: Rc<dyn gpui::Platform>, base_path: Option<&str>) {
     if let Some(base_path) = base_path.filter(|path| !path.is_empty()) {
@@ -393,16 +439,30 @@ fn main() {
         .with_assets(Assets)
         .with_restart_arguments(restart_arguments);
 
-    let app_db = db::AppDatabase::new();
-    let system_id = app.background_executor().spawn(system_id());
-    let installation_id = app
+    #[cfg(target_env = "ohos")]
+    let app_db = app
         .background_executor()
-        .spawn(installation_id(KeyValueStore::from_app_db(&app_db)));
+        .spawn(async { Arc::new(db::AppDatabase::new()) })
+        .shared();
+    #[cfg(not(target_env = "ohos"))]
+    let app_db = futures::future::ready(Arc::new(db::AppDatabase::new())).shared();
+    let system_id = app.background_executor().spawn(system_id());
+    let installation_id = app.background_executor().spawn({
+        let app_db = app_db.clone();
+        async move {
+            let app_db = app_db.await;
+            installation_id(KeyValueStore::from_app_db(&app_db)).await
+        }
+    });
     let session_id = Uuid::new_v4().to_string();
-    let session = app.background_executor().spawn(Session::new(
-        session_id.clone(),
-        KeyValueStore::from_app_db(&app_db),
-    ));
+    let session = app.background_executor().spawn({
+        let app_db = app_db.clone();
+        let session_id = session_id.clone();
+        async move {
+            let app_db = app_db.await;
+            Session::new(session_id, KeyValueStore::from_app_db(&app_db)).await
+        }
+    });
     let background_executor = app.background_executor();
 
     let (open_listener, mut open_rx) = OpenListener::new();
@@ -534,21 +594,47 @@ fn main() {
             })
         }
     });
-    app.on_reopen(move |cx| {
-        if let Some(app_state) = AppState::try_global(cx) {
-            cx.spawn({
-                async move |cx| {
-                    if let Err(e) = restore_or_create_workspace(app_state, cx).await {
-                        fail_to_open_window_async(e, cx)
+    #[cfg(target_env = "ohos")]
+    let initial_workspace_created = Rc::new(std::cell::Cell::new(false));
+    app.on_reopen({
+        #[cfg(target_env = "ohos")]
+        let initial_workspace_created = initial_workspace_created.clone();
+        move |cx| {
+            // Foregrounding the Ability during startup must not race session restoration.
+            #[cfg(target_env = "ohos")]
+            if !initial_workspace_created.get() {
+                return;
+            }
+            if let Some(app_state) = AppState::try_global(cx) {
+                cx.spawn({
+                    async move |cx| {
+                        if let Err(e) = restore_or_create_workspace(app_state, cx).await {
+                            fail_to_open_window_async(e, cx)
+                        }
                     }
-                }
-            })
-            .detach();
+                })
+                .detach();
+            }
         }
     });
 
-    run_application(app, move |cx| {
-        cx.set_global(app_db);
+    #[cfg(target_env = "ohos")]
+    let launch_state = async move {
+        // These tasks can still be waiting for disk I/O after the database opens.
+        // Await them before initialization instead of blocking the Ability thread.
+        let (system_id, installation_id, session) =
+            future::join3(system_id, installation_id, session).await;
+        (app_db.await, system_id.ok(), installation_id.ok(), session)
+    };
+    #[cfg(not(target_env = "ohos"))]
+    let launch_state = app_db;
+
+    run_application_with_state(app, launch_state, move |cx, launch_state| {
+        #[cfg(target_env = "ohos")]
+        let (app_db, system_id, installation_id, session) = launch_state;
+        #[cfg(not(target_env = "ohos"))]
+        let app_db = launch_state;
+        cx.set_global(db::AppDatabase(app_db.0.clone()));
         let db_trusted_paths = match workspace::WorkspaceDb::global(cx).fetch_trusted_worktrees() {
             Ok(trusted_paths) => trusted_paths,
             Err(e) => {
@@ -664,8 +750,11 @@ fn main() {
         client::init(&client, cx);
         feature_flags::FeatureFlagStore::init(cx);
 
+        #[cfg(not(target_env = "ohos"))]
         let system_id = cx.foreground_executor().block_on(system_id).ok();
+        #[cfg(not(target_env = "ohos"))]
         let installation_id = cx.foreground_executor().block_on(installation_id).ok();
+        #[cfg(not(target_env = "ohos"))]
         let session = cx.foreground_executor().block_on(session);
 
         let telemetry = client.telemetry();
@@ -747,9 +836,7 @@ fn main() {
         );
         command_palette::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
-            enterprise_uri: language::language_settings::all_language_settings(None, cx)
-                .edit_predictions
-                .copilot
+            enterprise_uri: settings::CopilotSettings::get_global(cx)
                 .enterprise_uri
                 .clone(),
         };
@@ -797,9 +884,19 @@ fn main() {
         recent_projects::init(cx);
         dev_container::init(cx);
 
-        load_embedded_fonts(cx);
+        #[cfg(not(target_env = "ohos"))]
+        if let Err(error) = cx.foreground_executor().block_on(load_embedded_fonts(
+            cx.asset_source().clone(),
+            cx.text_system().clone(),
+            cx.background_executor().clone(),
+        )) {
+            fail_to_open_window(error.context("loading embedded fonts"), cx);
+            return;
+        }
         #[cfg(target_os = "linux")]
-        prewarm_fonts(cx);
+        let font_prewarm = prewarm_fonts(cx);
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        font_prewarm.detach();
 
         editor::init(cx);
         image_viewer::init(cx);
@@ -997,36 +1094,50 @@ fn main() {
             )
         };
 
-        let restore_task = match open_rx
+        let initial_request = open_rx
             .try_recv()
             .ok()
-            .and_then(|request| OpenRequest::parse(request, cx).log_err())
-        {
-            Some(request) if request.is_focus_app_only() => cx.spawn({
-                let app_state = app_state.clone();
-                async move |cx| {
-                    if let Err(e) = restore_or_create_workspace(app_state, cx).await {
-                        fail_to_open_window_async(e, cx)
+            .and_then(|request| OpenRequest::parse(request, cx).log_err());
+        let restore_workspace = {
+            let app_state = app_state.clone();
+            move |cx: &mut App| match initial_request {
+                Some(request) if request.is_focus_app_only() => cx.spawn({
+                    let app_state = app_state.clone();
+                    async move |cx| {
+                        if let Err(e) = restore_or_create_workspace(app_state, cx).await {
+                            fail_to_open_window_async(e, cx)
+                        }
                     }
+                }),
+                Some(request) => {
+                    handle_open_request(request, app_state.clone(), cx);
+                    Task::ready(())
                 }
-            }),
-            Some(request) => {
-                handle_open_request(request, app_state.clone(), cx);
-                Task::ready(())
+                None => cx.spawn({
+                    let app_state = app_state.clone();
+                    async move |cx| {
+                        if let Err(e) = restore_or_create_workspace(app_state, cx).await {
+                            fail_to_open_window_async(e, cx)
+                        }
+                    }
+                }),
             }
-            None => cx.spawn({
-                let app_state = app_state.clone();
-                async move |cx| {
-                    if let Err(e) = restore_or_create_workspace(app_state, cx).await {
-                        fail_to_open_window_async(e, cx)
-                    }
-                }
-            }),
         };
+        #[cfg(target_env = "ohos")]
+        let restore_task = cx.spawn(async move |cx| {
+            // OHOS font discovery holds the text-system write lock during disk I/O.
+            // Await it before first-frame layout, without blocking ArkUI's event loop.
+            font_prewarm.await;
+            cx.update(restore_workspace).await;
+        });
+        #[cfg(not(target_env = "ohos"))]
+        let restore_task = restore_workspace(cx);
 
         let (first_window_tx, first_window_rx) = oneshot::channel::<()>();
         let first_window_tx = Rc::new(RefCell::new(Some(first_window_tx)));
         let _first_window_subscription = cx.observe_new::<MultiWorkspace>(move |_, _, _| {
+            #[cfg(target_env = "ohos")]
+            initial_workspace_created.set(true);
             if let Some(tx) = first_window_tx.borrow_mut().take() {
                 tx.send(()).ok();
             }
@@ -1896,32 +2007,38 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
     }
 }
 
-fn load_embedded_fonts(cx: &App) {
-    let asset_source = cx.asset_source();
-    let font_paths = asset_source.list("fonts").unwrap();
-    let embedded_fonts = Mutex::new(Vec::new());
-    let executor = cx.background_executor();
-
-    cx.foreground_executor().block_on(executor.scoped(|scope| {
-        for font_path in &font_paths {
-            if !font_path.ends_with(".ttf") {
-                continue;
-            }
-
-            scope.spawn(async {
-                let font_bytes = asset_source.load(font_path).unwrap().unwrap();
-                embedded_fonts.lock().push(font_bytes);
-            });
+async fn load_embedded_fonts(
+    asset_source: Arc<dyn gpui::AssetSource>,
+    text_system: Arc<gpui::TextSystem>,
+    executor: gpui::BackgroundExecutor,
+) -> Result<()> {
+    let font_paths = asset_source.list("fonts")?;
+    let mut font_tasks = Vec::new();
+    for font_path in font_paths {
+        if !font_path.ends_with(".ttf") {
+            continue;
         }
-    }));
-
-    cx.text_system()
-        .add_fonts(embedded_fonts.into_inner())
-        .unwrap();
+        font_tasks.push(executor.spawn({
+            let asset_source = asset_source.clone();
+            async move {
+                asset_source
+                    .load(&font_path)?
+                    .with_context(|| format!("missing embedded font {font_path}"))
+                    .map(|font_bytes| font_bytes.into_owned())
+            }
+        }));
+    }
+    let embedded_fonts = future::try_join_all(font_tasks).await?;
+    text_system.add_fonts(
+        embedded_fonts
+            .into_iter()
+            .map(std::borrow::Cow::Owned)
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn prewarm_fonts(cx: &mut App) {
+fn prewarm_fonts(cx: &mut App) -> Task<()> {
     let theme_settings = theme::theme_settings(cx);
     let ui_font = theme_settings.ui_font(cx).clone();
     let buffer_font = theme_settings.buffer_font(cx).clone();
@@ -1961,7 +2078,6 @@ fn prewarm_fonts(cx: &mut App) {
     cx.background_spawn(async move {
         text_system.prewarm_fonts(&fonts);
     })
-    .detach();
 }
 
 /// Spawns a background task to load the user themes from the themes directory.
@@ -1997,7 +2113,12 @@ fn load_user_themes_in_background(fs: Arc<dyn fs::Fs>, cx: &mut App) {
                 let Some(theme_path) = theme_path.log_err() else {
                     continue;
                 };
-                let Some(bytes) = fs.load_bytes(&theme_path).await.log_err() else {
+                let Some(bytes) = fs
+                    .load_bytes(&theme_path)
+                    .await
+                    .with_context(|| format!("loading theme bytes from {theme_path:?}"))
+                    .log_err()
+                else {
                     continue;
                 };
 
@@ -2029,7 +2150,11 @@ fn watch_themes(fs: Arc<dyn fs::Fs>, cx: &mut App) {
                     .is_some_and(|m| !m.is_dir)
                 {
                     let theme_registry = cx.update(|cx| ThemeRegistry::global(cx));
-                    if let Some(bytes) = fs.load_bytes(&event.path).await.log_err()
+                    if let Some(bytes) = fs
+                        .load_bytes(&event.path)
+                        .await
+                        .with_context(|| format!("loading theme bytes from {:?}", event.path))
+                        .log_err()
                         && load_user_theme(&theme_registry, &bytes).log_err().is_some()
                     {
                         cx.update(theme_settings::reload_theme);

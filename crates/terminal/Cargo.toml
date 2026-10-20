@@ -50,6 +50,15 @@ percent-encoding.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
+[target.'cfg(target_env = "ohos")'.dependencies]
+polling = "3.11"
+signal-hook = "0.4"
+
+[target.'cfg(unix)'.dev-dependencies]
+polling = "3.11"
+signal-hook = "0.4"
+tempfile.workspace = true
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 rand.workspace = true

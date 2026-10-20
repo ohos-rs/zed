@@ -6,6 +6,10 @@ use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
 
 mod hyperlinks;
 
+#[cfg(target_env = "ohos")]
+use crate::ohos_pty as tty;
+#[cfg(not(target_env = "ohos"))]
+use alacritty_terminal::tty;
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
@@ -21,7 +25,6 @@ use alacritty_terminal::{
         cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink},
         search::{Match, RegexIter, RegexSearch},
     },
-    tty,
     vi_mode::{ViModeCursor, ViMotion as AlacViMotion},
     vte::ansi::{
         ClearMode, CursorShape as AlacCursorShape, CursorStyle as AlacCursorStyle,
@@ -55,7 +58,10 @@ pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
 pub(super) type AlacrittyHyperlink = AlacHyperlink;
 
 #[derive(Clone)]
-pub(super) struct ZedListener(UnboundedSender<PtyEvent>);
+pub(super) struct ZedListener {
+    sender: UnboundedSender<PtyEvent>,
+    generation: u64,
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct AlacrittySearch {
@@ -165,6 +171,23 @@ pub(super) fn pty_options(
     #[cfg(not(windows))] child_signal_mask: Option<tty::SignalMask>,
     #[cfg(windows)] escape_args: bool,
 ) -> tty::Options {
+    #[cfg(target_env = "ohos")]
+    {
+        let (program, args) =
+            shell.unwrap_or_else(|| (util::shell::get_system_shell(), vec!["-i".to_owned()]));
+        let mut command = std::process::Command::new(program);
+        util::shell::configure_ohos_command(&mut command);
+        command.args(args).envs(env);
+        if let Some(directory) = working_directory {
+            command.current_dir(directory);
+        }
+        tty::Options {
+            command,
+            child_signal_mask,
+            drain_on_exit: true,
+        }
+    }
+    #[cfg(not(target_env = "ohos"))]
     tty::Options {
         shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
         working_directory,
@@ -178,11 +201,18 @@ pub(super) fn pty_options(
 }
 
 pub(super) fn open_pty(
-    options: &tty::Options,
+    options: tty::Options,
     bounds: TerminalBounds,
     window_id: u64,
 ) -> io::Result<AlacrittyPty> {
-    tty::new(options, window_size_from_terminal_bounds(bounds), window_id)
+    #[cfg(target_env = "ohos")]
+    return tty::new(options, window_size_from_terminal_bounds(bounds), window_id);
+    #[cfg(not(target_env = "ohos"))]
+    return tty::new(
+        &options,
+        window_size_from_terminal_bounds(bounds),
+        window_id,
+    );
 }
 
 pub(super) fn new_term(
@@ -190,8 +220,16 @@ pub(super) fn new_term(
     bounds: TerminalBounds,
     events_tx: UnboundedSender<PtyEvent>,
     alternate_scroll: AlternateScroll,
+    generation: u64,
 ) -> Arc<AlacrittyTermLock> {
-    let mut term = Term::new(config.clone(), &bounds, ZedListener(events_tx));
+    let mut term = Term::new(
+        config.clone(),
+        &bounds,
+        ZedListener {
+            sender: events_tx,
+            generation,
+        },
+    );
 
     if let AlternateScroll::Off = alternate_scroll {
         term.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll));
@@ -206,8 +244,17 @@ pub(super) fn spawn_event_loop(
     pty: AlacrittyPty,
     drain_on_exit: bool,
 ) -> Result<PtySender> {
-    let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
-        .context("failed to create event loop")?;
+    let event_loop = EventLoop::new(
+        term,
+        ZedListener {
+            sender: events_tx,
+            generation: 0,
+        },
+        pty,
+        drain_on_exit,
+        false,
+    )
+    .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
     let _io_thread = event_loop.spawn();
 
@@ -325,7 +372,9 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
 
 impl EventListener for ZedListener {
     fn send_event(&self, event: AlacTermEvent) {
-        self.0.unbounded_send(PtyEvent::Event(event.into())).ok();
+        self.sender
+            .unbounded_send(PtyEvent::Event(event.into(), self.generation))
+            .ok();
     }
 }
 
@@ -1188,7 +1237,14 @@ mod tests {
     fn semantic_selection_stops_at_tree_branch() {
         let config = pty_term_config(1000, SettingsCursorShape::default());
         let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
-        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        let mut term = Term::new(
+            config,
+            &TerminalBounds::default(),
+            ZedListener {
+                sender: events_tx,
+                generation: 0,
+            },
+        );
         for character in "└─zms-demo.target".chars() {
             term.input(character);
         }

@@ -4,7 +4,7 @@ pub use encrypted_password::{EncryptedPassword, IKnowWhatIAmDoingAndIHaveReadThe
 
 use net::async_net::UnixListener;
 use smol::lock::Mutex;
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 use util::fs::make_file_executable;
 
 use std::ffi::OsStr;
@@ -24,7 +24,7 @@ use gpui::{AsyncApp, BackgroundExecutor, Task};
 use smol::fs;
 use util::{ResultExt as _, debug_panic, maybe};
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 use util::{paths::PathExt, shell::ShellKind};
 
 /// Path to the program used for askpass
@@ -115,10 +115,10 @@ pub struct AskPassSession {
     executor: BackgroundExecutor,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 const ASKPASS_SCRIPT_NAME: &str = "askpass.sh";
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 const GPG_WRAPPER_SCRIPT_NAME: &str = "gpg-wrapper.sh";
 
 impl AskPassSession {
@@ -223,8 +223,7 @@ impl AskPassSession {
     }
 
     /// Returns the value to set as SSH_ASKPASS.
-    /// On Unix this is the path to the generated shell script.
-    /// On Windows this is the path to cli.exe directly — no script needed.
+    /// Windows and OHOS invoke the packaged helper directly; other platforms use a shell script.
     pub fn script_path(&self) -> impl AsRef<OsStr> {
         self.askpass_task.script_path()
     }
@@ -232,19 +231,19 @@ impl AskPassSession {
     /// Path to a script suitable for git's `gpg.program`, routing GnuPG
     /// passphrase prompts through Zed's askpass UI. `None` if unavailable.
     pub fn gpg_wrapper_path(&self) -> Option<&std::path::Path> {
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
         return self.askpass_task.gpg_wrapper_path();
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_env = "ohos"))]
         return None;
     }
 
     /// Returns the socket path to set as ZED_ASKPASS_SOCKET.
     ///
-    /// On Windows, SSH_ASKPASS points directly to cli.exe. SSH passes only
+    /// Windows and OHOS invoke a packaged helper directly. SSH passes only
     /// the prompt string as argv[1] with no mechanism for extra arguments,
     /// so the socket path is communicated via this environment variable instead.
-    /// cli.exe must check ZED_ASKPASS_SOCKET before clap parses args.
-    #[cfg(target_os = "windows")]
+    /// The helper reads ZED_ASKPASS_SOCKET before parsing command-line arguments.
+    #[cfg(any(target_os = "windows", target_env = "ohos"))]
     pub fn socket_path(&self) -> impl AsRef<OsStr> {
         self.askpass_task.socket_path()
     }
@@ -252,14 +251,12 @@ impl AskPassSession {
 
 pub struct PasswordProxy {
     _task: Task<()>,
-    /// On Unix: path to the generated .sh askpass script (set as SSH_ASKPASS).
-    /// On Windows: path to cli.exe (set as SSH_ASKPASS directly — no script needed).
+    /// The packaged helper on Windows/OHOS, or the generated shell script elsewhere.
     askpass_script_path: std::path::PathBuf,
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
     gpg_wrapper_script_path: Option<std::path::PathBuf>,
-    /// On Windows only: path to the Unix socket, passed as ZED_ASKPASS_SOCKET
-    /// so cli.exe can find it without --askpass argument parsing.
-    #[cfg(target_os = "windows")]
+    /// The socket is passed through the environment when invoking the helper directly.
+    #[cfg(any(target_os = "windows", target_env = "ohos"))]
     askpass_socket_path: std::path::PathBuf,
 }
 
@@ -275,16 +272,24 @@ impl PasswordProxy {
     ) -> Result<Self> {
         let temp_dir = tempfile::Builder::new().prefix("zed-askpass").tempdir()?;
         let askpass_socket = temp_dir.path().join("askpass.sock");
-        let current_exec =
-            std::env::current_exe().context("Failed to determine current zed executable path.")?;
+        let askpass_program = if let Some(program) = ASKPASS_PROGRAM.get() {
+            program
+        } else {
+            // OHOS loads Zed as a library; current_exe points to the Ability host.
+            #[cfg(target_env = "ohos")]
+            let program = fs::canonicalize("/data/service/hnp/bin/zed-askpass")
+                .await
+                .context("The OHOS application has no packaged Zed authentication helper")?;
+            #[cfg(not(target_env = "ohos"))]
+            let program = std::env::current_exe()
+                .context("Failed to determine current zed executable path.")?;
+            ASKPASS_PROGRAM.get_or_init(|| program)
+        };
 
-        let askpass_program = ASKPASS_PROGRAM.get_or_init(|| current_exec);
-
-        // Unix: SSH_ASKPASS = path to generated .sh script in temp dir.
-        // Windows: SSH_ASKPASS = path to cli.exe directly. No script is written.
-        #[cfg(not(target_os = "windows"))]
+        // OHOS denies executing scripts from application data, so use the installed helper.
+        #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
         let askpass_script_path = temp_dir.path().join(ASKPASS_SCRIPT_NAME);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_env = "ohos"))]
         let askpass_script_path = askpass_program.to_path_buf();
 
         let askpass_socket_path = askpass_socket.clone();
@@ -294,7 +299,7 @@ impl PasswordProxy {
         // Unix where we control the pinentry via loopback mode. We compute the path
         // before the socket task takes ownership of `temp_dir`, and write the file
         // afterwards.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
         let (gpg_wrapper_script_path, gpg_wrapper_script) =
             match generate_gpg_wrapper_script(askpass_program, &askpass_socket_path) {
                 Ok(script) => (
@@ -345,9 +350,7 @@ impl PasswordProxy {
             .log_err();
         });
 
-        // Unix only: write the shell script and mark it executable.
-        // On Windows cli.exe is invoked directly, so no script is needed.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
         {
             let askpass_script = generate_askpass_script(askpass_program, &askpass_socket_path)?;
             fs::write(&askpass_script_path, askpass_script)
@@ -361,7 +364,7 @@ impl PasswordProxy {
         }
 
         // Write the gpg wrapper script (computed above) and mark it executable.
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
         let gpg_wrapper_script_path =
             if let Some((path, script)) = gpg_wrapper_script_path.zip(gpg_wrapper_script) {
                 match async {
@@ -388,9 +391,9 @@ impl PasswordProxy {
         Ok(Self {
             _task,
             askpass_script_path,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
             gpg_wrapper_script_path,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_env = "ohos"))]
             askpass_socket_path,
         })
     }
@@ -399,12 +402,12 @@ impl PasswordProxy {
         &self.askpass_script_path
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_env = "ohos"))]
     pub fn socket_path(&self) -> impl AsRef<OsStr> {
         &self.askpass_socket_path
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
     pub fn gpg_wrapper_path(&self) -> Option<&std::path::Path> {
         self.gpg_wrapper_script_path.as_deref()
     }
@@ -475,8 +478,8 @@ pub fn set_askpass_program(path: std::path::PathBuf) {
 }
 
 /// Generates the Unix shell askpass script.
-/// Not used on Windows — cli.exe is invoked directly as SSH_ASKPASS.
-#[cfg(not(target_os = "windows"))]
+/// Windows and OHOS invoke the packaged helper directly as SSH_ASKPASS.
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 fn generate_askpass_script(
     askpass_program: &std::path::Path,
     askpass_socket: &std::path::Path,
@@ -494,14 +497,13 @@ fn generate_askpass_script(
         .try_shell_safe(shell_kind)
         .context("Failed to shell-escape Askpass socket path")?;
     let print_args = "printf '%s\\0' \"$@\"";
-    let shebang = "#!/bin/sh";
     Ok(format!(
-        "{shebang}\n{print_args} | {askpass_program} --askpass={askpass_socket} 2> /dev/null \n",
+        "#!/bin/sh\n{print_args} | {askpass_program} --askpass={askpass_socket} 2> /dev/null \n",
     ))
 }
 
 #[inline]
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 fn generate_gpg_wrapper_script(
     askpass_program: &std::path::Path,
     askpass_socket: &std::path::Path,
@@ -608,7 +610,7 @@ printf '%s\n' "$passphrase" |
 
 /// Finds the real `gpg` (or `gpg2`) executable on `PATH`.
 #[inline]
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 fn find_gpg_program() -> Option<std::path::PathBuf> {
     ["gpg", "gpg2"]
         .into_iter()

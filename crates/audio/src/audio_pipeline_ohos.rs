@@ -1,103 +1,110 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use collections::HashMap;
-use gpui::{App, Global};
+use gpui::{App, AppContext as _, BorrowAppContext as _, Global, TaskExt as _};
+use parking_lot::Mutex;
+use rodio::{Decoder, Source, source::Buffered};
+use settings::Settings;
+use std::{io::Cursor, sync::Arc};
+use util::ResultExt;
 
-use crate::DeviceId;
-use crate::Sound;
+use crate::{AudioSettings, DeviceId, Sound};
 
-pub trait RodioExt: rodio::Source + Sized {
-    fn constant_params(
-        self,
-        _channel_count: rodio::ChannelCount,
-        _sample_rate: rodio::SampleRate,
-    ) -> Self {
-        self
-    }
-
-    fn constant_samplerate(self, _sample_rate: rodio::SampleRate) -> Self {
-        self
-    }
-
-    fn possibly_disconnected_channels_to_mono(self) -> Self {
-        self
-    }
-}
-
-impl<S: rodio::Source> RodioExt for S {}
+#[path = "audio_pipeline/rodio_ext.rs"]
+mod rodio_ext;
+pub use rodio_ext::RodioExt;
+mod input;
+mod output;
+pub use input::{InputStream, set_input_permission_handler};
+pub use output::OutputStream as TestOutput;
 
 #[derive(Default)]
 pub struct Audio {
-    source_cache: HashMap<Sound, ()>,
+    output: Arc<Mutex<Option<TestOutput>>>,
+    source_cache: HashMap<Sound, Buffered<Decoder<Cursor<Vec<u8>>>>>,
 }
 
 impl Global for Audio {}
 
 impl Audio {
-    pub fn play_sound(_sound: Sound, _cx: &mut App) {}
+    pub fn play_sound(sound: Sound, cx: &mut App) {
+        let device_id = AudioSettings::get_global(cx).output_audio_device.clone();
+        cx.update_default_global(|this: &mut Self, cx| {
+            let source = this.sound_source(sound, cx).log_err()?;
+            let output = this.output.clone();
+            cx.background_spawn(async move {
+                let mut output = output.lock();
+                if output
+                    .as_ref()
+                    .is_some_and(|output| output.check_error().is_err())
+                {
+                    if let Some(output) = output.take() {
+                        output.check_error().log_err();
+                    }
+                }
+                if output.is_none() {
+                    *output = Some(open_test_output(device_id)?);
+                }
+                let output = output
+                    .as_ref()
+                    .context("Audio output was not initialized")?;
+                output.mixer().add(source);
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            Some(())
+        });
+    }
 
-    pub fn end_call(_cx: &mut App) {}
+    pub fn end_call(cx: &mut App) {
+        cx.update_default_global(|this: &mut Self, cx| {
+            let output = std::mem::take(&mut this.output);
+            cx.background_spawn(async move { drop(output) }).detach();
+        });
+    }
+
+    fn sound_source(&mut self, sound: Sound, cx: &App) -> Result<impl Source + use<>> {
+        if let Some(source) = self.source_cache.get(&sound) {
+            return Ok(source.clone());
+        }
+        let path = format!("sounds/{}.wav", sound.file());
+        let bytes = cx
+            .asset_source()
+            .load(&path)?
+            .with_context(|| format!("No asset available for path {path}"))?
+            .into_owned();
+        let source = Decoder::new(Cursor::new(bytes))?.buffered();
+        self.source_cache.insert(sound, source.clone());
+        Ok(source)
+    }
 }
 
 pub fn init(_cx: &mut App) {}
 
 pub fn ensure_devices_initialized(cx: &mut App) {
-    if !cx.has_global::<AvailableAudioDevices>() {
-        cx.set_global(AvailableAudioDevices(Vec::new()));
+    if cx.has_global::<AvailableAudioDevices>() {
+        return;
     }
+    cx.set_global(AvailableAudioDevices::default());
+    let devices = cx.background_spawn(async move { output::available_devices() });
+    cx.spawn(async move |cx| {
+        if let Some(devices) = devices.await.log_err() {
+            cx.update(|cx| cx.set_global(AvailableAudioDevices(devices)));
+            cx.refresh();
+        }
+    })
+    .detach();
 }
 
 pub fn resolve_device(_device_id: Option<&DeviceId>, _input: bool) -> Result<Device> {
     Err(anyhow!("audio devices are not available on OHOS yet"))
 }
 
-pub fn open_input_stream(_device_id: Option<DeviceId>) -> Result<InputStream> {
-    Err(anyhow!("audio input is not available on OHOS yet"))
+pub fn open_input_stream(device_id: Option<DeviceId>) -> Result<InputStream> {
+    InputStream::open(device_id.as_deref())
 }
 
-pub fn open_test_output(_device_id: Option<DeviceId>) -> Result<TestOutput> {
-    Err(anyhow!("audio output is not available on OHOS yet"))
-}
-
-pub struct InputStream;
-
-pub struct TestOutput;
-
-impl TestOutput {
-    pub fn mixer(&self) -> TestMixer {
-        TestMixer
-    }
-}
-
-pub struct TestMixer;
-
-impl TestMixer {
-    pub fn add<S>(&self, _source: S) {}
-}
-
-impl Iterator for InputStream {
-    type Item = rodio::Sample;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
-impl rodio::Source for InputStream {
-    fn current_span_len(&self) -> Option<usize> {
-        None
-    }
-
-    fn channels(&self) -> rodio::ChannelCount {
-        crate::CHANNEL_COUNT
-    }
-
-    fn sample_rate(&self) -> rodio::SampleRate {
-        crate::SAMPLE_RATE
-    }
-
-    fn total_duration(&self) -> Option<std::time::Duration> {
-        None
-    }
+pub fn open_test_output(device_id: Option<DeviceId>) -> Result<TestOutput> {
+    TestOutput::open(device_id.as_deref())
 }
 
 pub struct Device;

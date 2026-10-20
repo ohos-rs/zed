@@ -74,7 +74,7 @@ zed_actions.workspace = true
 zed_credentials_provider.workspace = true
 
 [target.'cfg(target_env = "ohos")'.dependencies]
-rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", default-features = false }
+rodio = { git = "https://github.com/RustAudio/rodio", rev = "3ee9745862279ce1d18db593155016e7ce024aeb", default-features = false }
 
 [target.'cfg(not(target_env = "ohos"))'.dependencies]
 cpal.workspace = true

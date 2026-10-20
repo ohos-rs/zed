@@ -16,10 +16,10 @@ use std::{
 };
 use util::{ResultExt, maybe};
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_env = "ohos"))]
 const SERVER_PATH: &str =
     "node_modules/@tailwindcss/language-server/bin/tailwindcss-language-server";
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_env = "ohos")))]
 const SERVER_PATH: &str = "node_modules/.bin/tailwindcss-language-server";
 
 fn server_binary_arguments(server_path: &Path) -> Vec<OsString> {

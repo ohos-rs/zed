@@ -1,0 +1,249 @@
+--- a/expr.c
++++ b/expr.c
+@@ -784,8 +784,6 @@
+  * UTF-8 support code: low-level functions
+  */
+ 
+-/* CESU-8 multibyte and wide character conversion crafted for mksh */
+-
+ size_t
+ utf_mbtowc(unsigned int *dst, const char *src)
+ {
+@@ -798,11 +796,22 @@
+ 			*dst = wc;
+ 		return (wc ? ((const char *)s - src) : 0);
+ 	}
+-	if (wc < 0xC2 || wc >= 0xF0)
+-		/* < 0xC0: spurious second byte */
+-		/* < 0xC2: non-minimalistic mapping error in 2-byte seqs */
+-		/* > 0xEF: beyond BMP */
++	if (wc < 0xC2 || wc > 0xF4)
+ 		goto ilseq;
++
++	if (wc >= 0xF0) {
++		wc &= 0x07;
++		for (c = 0; c < 3; ++c) {
++			unsigned int continuation = ord(rtt2asc(*s++));
++
++			if ((continuation & 0xC0) != 0x80)
++				goto ilseq;
++			wc = (wc << 6) | (continuation & 0x3F);
++		}
++		if (wc < 0x10000 || wc > 0x10FFFF)
++			goto ilseq;
++		goto out;
++	}
+ 
+ 	if (wc < 0xE0) {
+ 		wc = (wc & 0x1F) << 6;
+@@ -840,10 +849,16 @@
+ 	}
+ 
+ 	d = (unsigned char *)dst;
++	if (wc > 0x10FFFF)
++		wc = 0xFFFD;
+ 	if (wc < 0x0800)
+ 		*d++ = asc2rtt((wc >> 6) | 0xC0);
+ 	else {
+-		*d++ = asc2rtt(((wc = wc > 0xFFFD ? 0xFFFD : wc) >> 12) | 0xE0);
++		if (wc > 0xFFFF) {
++			*d++ = asc2rtt((wc >> 18) | 0xF0);
++			*d++ = asc2rtt(((wc >> 12) & 0x3F) | 0x80);
++		} else
++			*d++ = asc2rtt((wc >> 12) | 0xE0);
+ 		*d++ = asc2rtt(((wc >> 6) & 0x3F) | 0x80);
+ 	}
+ 	*d++ = asc2rtt((wc & 0x3F) | 0x80);
+@@ -1219,6 +1234,10 @@
+ int
+ utf_wcwidth(unsigned int wc)
+ {
++	/* The bundled tables stop at the BMP; OHOS libc covers all planes. */
++	if (wc > 0xFFFF)
++		return (wc <= 0x10FFFF ? wcwidth((wchar_t)wc) : -1);
++
+ 	/* except NUL, C0/C1 control characters and DEL yield -1 */
+ 	if (wc < 0x20 || (wc >= 0x7F && wc < 0xA0))
+ 		return (wc ? -1 : 0);
+--- a/edit.c
++++ b/edit.c
+@@ -1223,32 +1223,30 @@
+ static int
+ x_e_getmbc(char *sbuf)
+ {
+-	int c, pos = 0;
++	int c, pos = 0, length = 1;
+ 	unsigned char *buf = (unsigned char *)sbuf;
+ 
+-	memset(buf, 0, 4);
++	memset(buf, 0, 5);
+ 	buf[pos++] = c = x_e_getc();
+ 	if (c == -1)
+ 		return (-1);
+ 	if (UTFMODE) {
+-		if ((rtt2asc(buf[0]) >= (unsigned char)0xC2) &&
+-		    (rtt2asc(buf[0]) < (unsigned char)0xF0)) {
+-			c = x_e_getc();
+-			if (c == -1)
+-				return (-1);
+-			if ((rtt2asc(c) & 0xC0) != 0x80) {
+-				x_e_ungetc(c);
+-				return (1);
+-			}
+-			buf[pos++] = c;
+-		}
+-		if ((rtt2asc(buf[0]) >= (unsigned char)0xE0) &&
+-		    (rtt2asc(buf[0]) < (unsigned char)0xF0)) {
+-			/* XXX x_e_ungetc is one-octet only */
+-			buf[pos++] = c = x_e_getc();
+-			if (c == -1)
+-				return (-1);
+-		}
++		if (rtt2asc(buf[0]) >= 0xC2 && rtt2asc(buf[0]) < 0xE0)
++			length = 2;
++		else if (rtt2asc(buf[0]) >= 0xE0 && rtt2asc(buf[0]) < 0xF0)
++			length = 3;
++		else if (rtt2asc(buf[0]) >= 0xF0 && rtt2asc(buf[0]) <= 0xF4)
++			length = 4;
++	}
++	while (pos < length) {
++		c = x_e_getc();
++		if (c == -1)
++			return (-1);
++		if ((rtt2asc(c) & 0xC0) != 0x80) {
++			x_e_ungetc(c);
++			break;
++		}
++		buf[pos++] = c;
+ 	}
+ 	return (pos);
+ }
+@@ -1358,7 +1356,7 @@
+ x_insert(int c)
+ {
+ 	static int left, pos, save_arg;
+-	static char str[4];
++	static char str[5];
+ 
+ 	/*
+ 	 * Should allow tab and control chars.
+@@ -1374,6 +1372,8 @@
+ 			str[pos++] = c;
+ 			if (!--left) {
+ 				str[pos] = '\0';
++				if (utf_mbtowc(NULL, str) == (size_t)-1)
++					goto invmbs;
+ 				x_arg = save_arg;
+ 				while (x_arg--)
+ 					x_ins(str);
+@@ -1392,6 +1392,8 @@
+ 			left = 1;
+ 		else if ((c >= 0xE0) && (c < 0xF0))
+ 			left = 2;
++		else if ((c >= 0xF0) && (c <= 0xF4))
++			left = 3;
+ 		else if (c > 0x7F)
+ 			goto invmbs;
+ 		else
+@@ -1766,7 +1768,7 @@
+ x_search_char_forw(int c MKSH_A_UNUSED)
+ {
+ 	char *cp = xcp;
+-	char tmp[4];
++	char tmp[5];
+ 
+ 	*xep = '\0';
+ 	if (x_e_getmbc(tmp) < 0) {
+@@ -1787,13 +1789,14 @@
+ static int
+ x_search_char_back(int c MKSH_A_UNUSED)
+ {
+-	char *cp = xcp, *p, tmp[4];
+-	bool b;
++	char *cp = xcp, *p, tmp[5];
++	size_t length;
+ 
+ 	if (x_e_getmbc(tmp) < 0) {
+ 		x_e_putc2(KSH_BEL);
+ 		return (KSTD);
+ 	}
++	length = strlen(tmp);
+ 	for (; x_arg--; cp = p)
+ 		for (p = cp; ; ) {
+ 			if (p-- == xbuf)
+@@ -1802,17 +1805,8 @@
+ 				x_e_putc2(KSH_BEL);
+ 				return (KSTD);
+ 			}
+-			if ((tmp[1] && ((p+1) > xep)) ||
+-			    (tmp[2] && ((p+2) > xep)))
+-				continue;
+-			b = true;
+-			if (*p != tmp[0])
+-				b = false;
+-			if (b && tmp[1] && p[1] != tmp[1])
+-				b = false;
+-			if (b && tmp[2] && p[2] != tmp[2])
+-				b = false;
+-			if (b)
++			if ((size_t)(xep - p) >= length &&
++			    memcmp(p, tmp, length) == 0)
+ 				break;
+ 		}
+ 	x_goto(cp);
+@@ -3002,17 +2996,14 @@
+ 	if (x_col < xx_cols) {
+ #ifndef MKSH_EBCDIC
+ 		if (UTFMODE && (c > 0x7F)) {
+-			char utf_tmp[3];
+-			size_t x;
++			char utf_tmp[4];
++			size_t x, index;
+ 
+ 			if (c < 0xA0)
+ 				c = 0xFFFD;
+ 			x = utf_wctomb(utf_tmp, c);
+-			x_putc(utf_tmp[0]);
+-			if (x > 1)
+-				x_putc(utf_tmp[1]);
+-			if (x > 2)
+-				x_putc(utf_tmp[2]);
++			for (index = 0; index < x; ++index)
++				x_putc(utf_tmp[index]);
+ 			width = utf_wcwidth(c);
+ 		} else
+ #endif
+--- a/funcs.c
++++ b/funcs.c
+@@ -303,7 +303,7 @@
+ 		/* output file descriptor (if any) */
+ 		int fd;
+ 		/* temporary storage for a multibyte character */
+-		char ts[4];
++		char ts[5];
+ 		/* output word separator */
+ 		char ws;
+ 		/* output line separator */
+--- a/lex.c
++++ b/lex.c
+@@ -596,7 +596,7 @@
+ 				if (c2 == 0)
+ 					statep->ls_bool = true;
+ 				if (!statep->ls_bool) {
+-					char ts[4];
++					char ts[5];
+ 
+ 					if ((unsigned int)c2 < 0x100) {
+ 						*wp++ = QCHAR;
+--- a/sh.h
++++ b/sh.h
+@@ -111,9 +111,7 @@
+ #if HAVE_VALUES_H
+ #include <values.h>
+ #endif
+-#ifdef MIRBSD_BOOTFLOPPY
+ #include <wchar.h>
+-#endif
+ 
+ /* monkey-patch known-bad offsetof versions to quell a warning */
+ #if (defined(__KLIBC__) || defined(__dietlibc__)) && \

@@ -299,6 +299,14 @@ impl LspAdapter for VtslsLspAdapter {
             }
         });
 
+        // TypeScript's automatic typings installer rejects the `openharmony` platform
+        // while choosing its global cache directory, terminating the semantic server.
+        #[cfg(target_env = "ohos")]
+        merge_json_value_into(
+            json!({ "typescript": { "disableAutomaticTypeAcquisition": true } }),
+            &mut default_workspace_configuration,
+        );
+
         let override_options = cx.update(|cx| {
             language_server_settings(delegate.as_ref(), &SERVER_NAME, cx)
                 .and_then(|s| s.settings.clone())

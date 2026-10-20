@@ -1,0 +1,12 @@
+{
+  "string": [
+    {
+      "name": "microphone_permission_reason",
+      "value": "Test the microphone in audio settings"
+    },
+    {
+      "name": "pasteboard_permission_reason",
+      "value": "Paste text and files into the editor"
+    }
+  ]
+}

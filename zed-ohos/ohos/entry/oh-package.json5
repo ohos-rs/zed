@@ -1,0 +1,17 @@
+{
+  "name": "entry",
+  "version": "0.1.0",
+  "dependencies": {
+    "@ohos-rs/ability": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/native_ability",
+    "@ohos-rs/ability-plugin-app-control": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/app-control",
+    "@ohos-rs/ability-plugin-clipboard": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/clipboard",
+    "@ohos-rs/ability-plugin-files": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/files",
+    "@ohos-rs/ability-plugin-menu": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/menu",
+    "@ohos-rs/ability-plugin-permission": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/permission",
+    "@ohos-rs/ability-plugin-url": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/url",
+    "@ohos-rs/ability-plugin-window": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/window",
+    "@ohos-rs/ability-plugin-notification": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/notification",
+    "@ohos-rs/ability-plugin-system-state": "file:../../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/system-state",
+    "libzed.so": "file:./src/main/ets/types/libzed"
+  }
+}

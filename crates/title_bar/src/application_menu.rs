@@ -185,6 +185,7 @@ impl ApplicationMenu {
             .occlude()
             .child(
                 PopoverMenu::new(format!("{}-menu-popover", menu_name))
+                    .native_app_menu(None)
                     .menu(move |window, cx| {
                         Self::build_menu_from_items(entry.clone(), window, cx).into()
                     })
@@ -220,6 +221,7 @@ impl ApplicationMenu {
             .occlude()
             .child(
                 PopoverMenu::new(format!("{}-menu-popover", menu_name))
+                    .native_app_menu(Some(menu_name.clone()))
                     .menu(move |window, cx| {
                         Self::build_menu_from_items(entry.clone(), window, cx).into()
                     })
@@ -235,7 +237,11 @@ impl ApplicationMenu {
                     .with_handle(current_handle.clone()),
             )
             .on_hover(move |hover_enter, window, cx| {
-                if *hover_enter && !current_handle.is_deployed() {
+                if *hover_enter
+                    && !current_handle.is_deployed()
+                    && (open_menus_on_hover(cx)
+                        || all_handles.iter().any(|handle| handle.is_deployed()))
+                {
                     all_handles.iter().for_each(|h| h.hide(cx));
 
                     // We need to defer this so that this menu handle can take focus from the previous menu
@@ -313,6 +319,10 @@ impl ApplicationMenu {
 pub(crate) fn show_menus(cx: &mut App) -> bool {
     TitleBarSettings::get_global(cx).show_menus
         && (cfg!(not(target_os = "macos")) || option_env!("ZED_USE_CROSS_PLATFORM_MENU").is_some())
+}
+
+pub(crate) fn open_menus_on_hover(cx: &mut App) -> bool {
+    TitleBarSettings::get_global(cx).open_menus_on_hover
 }
 
 impl Render for ApplicationMenu {

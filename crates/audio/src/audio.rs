@@ -7,18 +7,18 @@ pub const SAMPLE_RATE: SampleRate = nz!(48000);
 pub const CHANNEL_COUNT: ChannelCount = nz!(2);
 
 mod audio_settings;
-pub use audio_settings::DeviceId;
 pub use audio_settings::AudioSettings;
+pub use audio_settings::DeviceId;
 
 #[cfg(not(target_env = "ohos"))]
 mod audio_pipeline;
 #[cfg(target_env = "ohos")]
 mod audio_pipeline_ohos;
-#[cfg(target_env = "ohos")]
-use audio_pipeline_ohos as audio_pipeline;
 pub use audio_pipeline::Audio;
 pub use audio_pipeline::{AudioDeviceInfo, AvailableAudioDevices};
 pub use audio_pipeline::{ensure_devices_initialized, resolve_device};
+#[cfg(target_env = "ohos")]
+use audio_pipeline_ohos as audio_pipeline;
 // TODO(audio) replace with input test functionality in the audio crate
 pub use audio_pipeline::RodioExt;
 pub use audio_pipeline::init;
@@ -50,3 +50,6 @@ impl Sound {
         }
     }
 }
+
+#[cfg(target_env = "ohos")]
+pub use audio_pipeline_ohos::set_input_permission_handler;

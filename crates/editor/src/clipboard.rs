@@ -250,6 +250,33 @@ impl Editor {
     }
 
     pub fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_env = "ohos")]
+        {
+            // Native clipboard updates invalidate the synchronous cache. The first
+            // paste must await the new contents instead of only starting a refresh.
+            let snapshot = self.display_snapshot(cx);
+            let selections = self.selections.all_anchors(&snapshot);
+            let edit_count = snapshot.buffer_snapshot().edit_count();
+            let clipboard = cx.read_from_clipboard_async();
+            let task = cx.spawn_in(window, async move |editor, cx| {
+                let Some(item) = clipboard.await? else {
+                    return anyhow::Ok(());
+                };
+                editor.update_in(cx, |editor, window, cx| {
+                    let snapshot = editor.display_snapshot(cx);
+                    // Permission prompts can outlive the selection that requested paste.
+                    if editor.focus_handle.is_focused(window)
+                        && snapshot.buffer_snapshot().edit_count() == edit_count
+                        && editor.selections.all_anchors(&snapshot) == selections
+                    {
+                        editor.paste_item(&item, window, cx);
+                        cx.notify();
+                    }
+                })
+            });
+            self.detach_and_notify_err(task, window, cx);
+        }
+        #[cfg(not(target_env = "ohos"))]
         if let Some(item) = cx.read_from_clipboard() {
             self.paste_item(&item, window, cx);
         }

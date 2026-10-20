@@ -41,9 +41,9 @@ impl EsLintLspAdapter {
     const CURRENT_VERSION: &'static str = "3.0.24";
     const CURRENT_VERSION_TAG_NAME: &'static str = "release/3.0.24";
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_env = "ohos")))]
     const GITHUB_ASSET_KIND: AssetKind = AssetKind::TarGz;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_env = "ohos"))]
     const GITHUB_ASSET_KIND: AssetKind = AssetKind::Zip;
 
     const SERVER_PATH: &'static str = "vscode-eslint/server/out/eslintServer.js";
@@ -130,7 +130,7 @@ impl LspInstaller for EsLintLspAdapter {
                 let repo_root = destination_path.join("vscode-eslint");
                 fs::rename(first.path(), &repo_root).await?;
 
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_env = "ohos"))]
                 {
                     handle_symlink(
                         repo_root.join("$shared"),
@@ -144,11 +144,16 @@ impl LspInstaller for EsLintLspAdapter {
                     .await?;
                 }
 
-                node.run_npm_subcommand(Some(&repo_root), "install", &[])
-                    .await?;
+                #[cfg(target_env = "ohos")]
+                compile_ohos_server(&node, &repo_root).await?;
+                #[cfg(not(target_env = "ohos"))]
+                {
+                    node.run_npm_subcommand(Some(&repo_root), "install", &[])
+                        .await?;
 
-                node.run_npm_subcommand(Some(&repo_root), "run-script", &["compile"])
-                    .await?;
+                    node.run_npm_subcommand(Some(&repo_root), "run-script", &["compile"])
+                        .await?;
+                }
             }
 
             Ok(LanguageServerBinary {
@@ -228,6 +233,13 @@ impl LspAdapter for EsLintLspAdapter {
         cx: &mut AsyncApp,
     ) -> Result<Value> {
         let worktree_root = delegate.worktree_root_path();
+        let workspace_directory = if self.fs.is_file(worktree_root).await {
+            worktree_root
+                .parent()
+                .context("ESLint's single-file worktree has no parent directory")?
+        } else {
+            worktree_root
+        };
         let requested_file_path = requested_uri
             .as_ref()
             .filter(|uri| uri.scheme() == "file")
@@ -235,12 +247,12 @@ impl LspAdapter for EsLintLspAdapter {
             .filter(|path| path.starts_with(worktree_root));
         let eslint_version = find_eslint_version(
             delegate.as_ref(),
-            worktree_root,
+            workspace_directory,
             requested_file_path.as_deref(),
         )
         .await?;
         let config_kind = find_eslint_config_kind(
-            worktree_root,
+            workspace_directory,
             requested_file_path.as_deref(),
             eslint_version.as_ref(),
             self.fs.as_ref(),
@@ -258,11 +270,11 @@ impl LspAdapter for EsLintLspAdapter {
                 "mode": "auto"
             },
             "workspaceFolder": {
-                "uri": Uri::from_file_path(worktree_root)
+                "uri": Uri::from_file_path(workspace_directory)
                     .map(|uri| uri.as_str().to_owned())
                     .unwrap_or_default(),
-                "name": worktree_root.file_name()
-                    .unwrap_or(worktree_root.as_os_str())
+                "name": workspace_directory.file_name()
+                    .unwrap_or(workspace_directory.as_os_str())
                     .to_string_lossy(),
             },
             "problems": {},
@@ -312,7 +324,7 @@ impl LspAdapter for EsLintLspAdapter {
             let working_directory = working_directories
                 .zip(requested_uri)
                 .and_then(|(wd, uri)| {
-                    determine_working_directory(uri, wd, worktree_root.to_owned())
+                    determine_working_directory(uri, wd, workspace_directory.to_owned())
                 });
 
             if let Some(working_directory) = working_directory
@@ -569,7 +581,44 @@ fn match_glob_pattern(pattern: &str, file_path: &Path) -> Option<String> {
     matched
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(target_env = "ohos")]
+async fn compile_ohos_server(node: &NodeRuntime, repo_root: &Path) -> Result<()> {
+    // The extension's root install builds its VS Code client and requires native esbuild and
+    // npm bin symlinks, neither of which runs in the OHOS sandbox. Zed only needs the server.
+    let package: Value = serde_json::from_slice(&fs::read(repo_root.join("package.json")).await?)?;
+    let dependencies = package
+        .get("devDependencies")
+        .context("ESLint source package is missing its build dependencies")?;
+    let compiler_packages = ["typescript", "@types/node"]
+        .map(|name| {
+            dependencies
+                .get(name)
+                .and_then(Value::as_str)
+                .map(|version| (name, version))
+                .with_context(|| format!("ESLint source package is missing {name}"))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let server_directory = repo_root.join("server");
+    node.npm_install_packages(&server_directory, &compiler_packages)
+        .await?;
+    let output = util::command::new_command(node.binary_path().await?)
+        .arg(server_directory.join("node_modules/typescript/bin/tsc"))
+        .args(["--build", "tsconfig.json"])
+        .current_dir(&server_directory)
+        .output()
+        .await
+        .context("starting the ESLint server TypeScript compiler")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "compiling the ESLint server failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", target_env = "ohos"))]
 async fn handle_symlink(src_dir: PathBuf, dest_dir: PathBuf) -> Result<()> {
     anyhow::ensure!(
         fs::metadata(&src_dir).await.is_ok(),

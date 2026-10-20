@@ -1,0 +1,10 @@
+{
+  "app": {
+    "bundleName": "dev.zed.ohos",
+    "vendor": "ohos-rs",
+    "versionCode": 1,
+    "versionName": "0.1.0",
+    "icon": "$media:zed_icon",
+    "label": "$string:app_name"
+  }
+}

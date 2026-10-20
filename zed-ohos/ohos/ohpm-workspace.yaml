@@ -1,0 +1,3 @@
+packages:
+  - "../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/native_ability"
+  - "../../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/plugins/*"

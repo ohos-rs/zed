@@ -111,7 +111,11 @@ pub fn os_name() -> String {
     {
         "macOS".to_string()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(target_env = "ohos")]
+    {
+        "OpenHarmony".to_string()
+    }
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     {
         format!("Linux {}", gpui::guess_compositor())
     }
@@ -147,6 +151,22 @@ pub fn os_version() -> String {
            MACOS_VERSION_REGEX
                .replace_all(&version_string, "")
                .to_string()
+       }
+       target_env = "ohos" => {
+           use std::ffi::{CStr, c_char};
+
+           #[link(name = "deviceinfo_ndk.z")]
+           unsafe extern "C" {
+               fn OH_GetOSFullName() -> *const c_char;
+           }
+
+           let version = unsafe { OH_GetOSFullName() };
+           if version.is_null() {
+               log::error!("OpenHarmony did not return its OS version");
+               "unknown".to_string()
+           } else {
+               unsafe { CStr::from_ptr(version) }.to_string_lossy().into_owned()
+           }
        }
        any(target_os = "linux", target_os = "freebsd") => {
            use std::path::Path;
@@ -213,9 +233,9 @@ impl Telemetry {
 
         cx.background_spawn({
             let state = state.clone();
-            let os_version = os_version();
-            state.lock().os_version = Some(os_version);
             async move {
+                let os_version = os_version();
+                state.lock().os_version = Some(os_version);
                 if let Some(tempfile) = File::create(Self::log_file_path()).ok() {
                     state.lock().log_file = Some(tempfile);
                 }
@@ -743,6 +763,23 @@ mod tests {
     use telemetry_events::FlexibleEvent;
     use util::rel_path::RelPath;
     use worktree::{PathChange, ProjectEntryId, WorktreeId};
+
+    #[gpui::test]
+    fn test_telemetry_initialization_defers_system_query(cx: &mut TestAppContext) {
+        init_test(cx);
+        let telemetry = cx.update(|cx| {
+            let telemetry = Telemetry::new(
+                Arc::new(FakeSystemClock::new()),
+                FakeHttpClient::with_200_response(),
+                cx,
+            );
+            assert!(telemetry.state.lock().os_version.is_none());
+            telemetry
+        });
+
+        cx.run_until_parked();
+        assert!(telemetry.state.lock().os_version.is_some());
+    }
 
     #[gpui::test]
     async fn test_telemetry_flush_on_max_queue_size(

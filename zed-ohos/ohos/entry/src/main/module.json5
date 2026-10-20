@@ -1,0 +1,59 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "mainElement": "EntryAbility",
+    "deviceTypes": ["phone", "tablet", "2in1"],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:microphone_permission_reason",
+        "usedScene": { "abilities": ["EntryAbility", "WorkspaceAbility"], "when": "inuse" }
+      },
+      { "name": "ohos.permission.INTERNET" },
+      { "name": "ohos.permission.PREPARE_APP_TERMINATE" },
+      { "name": "ohos.permission.FILE_ACCESS_PERSIST" },
+      {
+        "name": "ohos.permission.READ_PASTEBOARD",
+        "reason": "$string:pasteboard_permission_reason",
+        "usedScene": { "abilities": ["EntryAbility", "WorkspaceAbility"], "when": "inuse" }
+      }
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "icon": "$media:zed_icon",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:zed_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "skills": [
+          { "entities": ["entity.system.home"], "actions": ["ohos.want.action.home"] },
+          {
+            "actions": ["ohos.want.action.viewData"],
+            "uris": [{ "scheme": "zed" }]
+          },
+          {
+            "actions": ["ohos.want.action.viewData"],
+            "uris": [{ "scheme": "file", "type": "general.text", "linkFeature": "FileOpen" }]
+          }
+        ]
+      },
+      {
+        "name": "WorkspaceAbility",
+        "srcEntry": "./ets/entryability/WorkspaceAbility.ets",
+        "launchType": "multiton",
+        "icon": "$media:zed_icon",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:zed_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "startWindow": "$profile:workspace_start_window",
+        "exported": false
+      }
+    ]
+  }
+}

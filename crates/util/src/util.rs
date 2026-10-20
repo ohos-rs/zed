@@ -45,7 +45,6 @@ pub use path::PathExt;
 pub use path::normalize_path;
 pub use path::rel_path;
 
-pub use take_until::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use util_macros::{line_endings, path, uri};
 
@@ -53,12 +52,6 @@ pub use util_macros::{line_endings, path, uri};
 pub use self::shell::{
     get_default_system_shell, get_default_system_shell_preferring_bash, get_system_shell,
 };
-
-#[inline]
-pub const fn is_utf8_char_boundary(u8: u8) -> bool {
-    // This is bit magic equivalent to: b < 128 || b >= 192
-    (u8 as i8) >= -0x40
-}
 
 pub fn truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
@@ -277,7 +270,7 @@ pub fn increase_open_file_limit() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn load_shell_from_passwd() -> Result<()> {
     let buflen = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
         n if n < 0 => 1024,
@@ -401,6 +394,7 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
 pub async fn load_login_shell_environment() -> Result<()> {
     use anyhow::Context as _;
 
+    #[cfg(not(target_env = "ohos"))]
     load_shell_from_passwd().log_err();
 
     // If possible, we want to `cd` in the user's `$HOME` to trigger programs
