@@ -1,4 +1,4 @@
 [submodule "zed-ohos/vendor/gpui-ohos"]
 	path = vendor/gpui-ohos
 	url = https://github.com/ohos-rs/gpui-ohos.git
-	branch = codex/zed-ohos-runtime-adaptation
+	branch = codex/native-prompt-style

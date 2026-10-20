@@ -15,9 +15,9 @@ Initialize the single runtime source tree from the repository root:
 git submodule update --init --recursive
 ```
 
-`../vendor/gpui-ohos` is pinned to `dc443d9f7f25ed7a344b9924492a41e1149bb677`.
+`../vendor/gpui-ohos` is pinned to `c54d042800f80d1a283a0418e38252d2bb06337e`.
 Its nested Ability submodule is pinned to
-`6454a9c34a62add21e258d717b09f12d142120b4`; that runtime pins IME binding
+`876f86dc7c4eaeae1b6e0fac28cc3f28e81a011d`; that runtime pins IME binding
 `d47a3d9f0661dbe73720240174c1f37eb8fc7858`.
 Rust and ArkTS both consume this same Ability directory. Do not copy the runtime
 into the application or substitute a registry package on only one side.
@@ -62,7 +62,9 @@ The app disables the runtime's extra menu bar and shortcut dispatcher.
 Zed retains its existing asynchronous save confirmation workflow. Cancelling or
 failing a close leaves the window available for another request.
 Native menu opening clears the current window's pending shortcut prefix even
-though the editor's GPUI focus is retained.
+though the editor's GPUI focus is retained. Ability renders confirmation cards
+with neutral semantic colors, an outlined cancel control and one primary action,
+using a wrapping desktop footer and a stacked layout in narrow windows.
 
 Restart state must be persisted before requesting the SDK restart. A rejected
 restart request retains existing windows and shows an error. An accepted restart
