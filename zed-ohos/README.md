@@ -15,13 +15,13 @@ Initialize the single runtime source tree from the repository root:
 git submodule update --init --recursive
 ```
 
-`../vendor/gpui-ohos` is pinned to `c54d042800f80d1a283a0418e38252d2bb06337e`.
+`../vendor/gpui-ohos` is pinned to `a50bfec74e4d970a801fa49746ef80470c314848`.
 Its nested Ability submodule is pinned to
-`876f86dc7c4eaeae1b6e0fac28cc3f28e81a011d`; that runtime pins IME binding
-`d47a3d9f0661dbe73720240174c1f37eb8fc7858`.
+`84c16b88f0957c71e234f383ff7ff198bfcdf5ea`; that runtime pins IME binding
+`842f4d4105b6c34a7c108d29c88d17cb496ed912`.
 Rust and ArkTS both consume this same Ability directory. Do not copy the runtime
 into the application or substitute a registry package on only one side.
-Zed's local GPUI crate supplies the native menu and RGBA capture interfaces and
+Zed's local GPUI crate supplies native menu, prompt appearance and RGBA capture interfaces and
 retains the existing terminal interfaces for the separate terminal work.
 
 The application remains a separate Cargo workspace. The parent workspace
@@ -58,6 +58,9 @@ workspace windows through the shared runtime. The system renders menus and
 prompts, while Zed owns action validation, shortcuts, unsaved-change confirmation,
 workspace persistence and the decision to exit after its last window closes.
 The app disables the runtime's extra menu bar and shortcut dispatcher.
+Native confirmations receive the active Zed theme's surface, text, accent, border
+and focus colors. The runtime composites alpha and repairs unreadable color
+pairs; applications which omit prompt appearance keep system colors.
 
 Zed retains its existing asynchronous save confirmation workflow. Cancelling or
 failing a close leaves the window available for another request.
