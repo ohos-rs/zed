@@ -16,9 +16,7 @@ export default class EntryAbility extends NativeAbility {
   public independentWindowAbility: string = "WorkspaceAbility";
   public bridgePlugins = [
     new LazyPlugin(() => new AppControlPlugin()),
-    new LazyPlugin(
-      () => new ClipboardPlugin({ metadataMimeType: "application/x-gpui-ohos-text-metadata-v1" }),
-    ),
+    new LazyPlugin(() => new ClipboardPlugin()),
     new LazyPlugin(() => new FilesPlugin()),
     // Zed resolves shortcuts against the focused editor, terminal and custom keymap.
     new LazyPlugin(() => new MenuPlugin({ handleKeyboardShortcuts: false, showMenuBar: false })),

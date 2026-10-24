@@ -94,6 +94,7 @@ fn openharmony_app(app: OpenHarmonyApp) {
         app,
         gpui_ohos::PlatformOptions {
             native_menus: true,
+            persist_file_access: true,
         },
     ) {
         Ok(platform) => platform,

@@ -1,2 +1,3 @@
 [env]
 OHOS_DEVICE_TYPE = { value = "desktop", force = false }
+ZED_UPDATE_EXPLANATION = { value = "Update Zed by installing a newer HarmonyOS application package.", force = false }

@@ -13,25 +13,8 @@ use workspace::WorkspaceSettings;
 pub fn init(cx: &mut App) {
     process_settings(cx);
 
-    update_native_prompt_style(cx);
-    cx.observe_global::<theme::GlobalTheme>(update_native_prompt_style)
-        .detach();
-
     cx.observe_global::<SettingsStore>(process_settings)
         .detach();
-}
-
-fn update_native_prompt_style(cx: &mut App) {
-    let colors = cx.theme().colors();
-    cx.set_native_prompt_style(Some(gpui::PromptStyle {
-        background: colors.elevated_surface_background.to_rgb(),
-        foreground: colors.text.to_rgb(),
-        muted_foreground: colors.text_muted.to_rgb(),
-        primary: colors.text_accent.to_rgb(),
-        primary_foreground: colors.elevated_surface_background.to_rgb(),
-        border: colors.border.to_rgb(),
-        focus: colors.border_focused.to_rgb(),
-    }));
 }
 
 fn process_settings(cx: &mut App) {

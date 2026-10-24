@@ -37,9 +37,9 @@ export declare function onBridgeLifecycle(kind: string): void
   */
 export declare function onBridgeSyncEvent(pluginId: string, event: string, requestTypeName: string, responseTypeName: string, value: unknown): unknown
 
-export declare function render(slot: NodeContent, renderOwner: string, nativeWindowId: number): void
+export declare function render(slot: NodeContent, renderOwner: string, nativeWindowId?: number | undefined | null): void
 
-export declare function renderWindow(slot: NodeContent, renderOwner: string, windowId: number, nativeWindowId: number): void
+export declare function renderWindow(slot: NodeContent, renderOwner: string, windowId: number, nativeWindowId?: number | undefined | null): void
 
 export interface UrlOpenFileRequest {
   uri: string
@@ -74,20 +74,13 @@ export interface UrlSchemeResponse {
   declared: boolean
 }
 
-export interface ClipboardChangedEvent {
-
-}
-
-export interface ClipboardClearRequest {
-
-}
-
-export interface ClipboardClearResponse {
-  accepted: boolean
-}
-
-export interface ClipboardReadAuthorizedRecordsRequest {
-
+/**
+  * One exact representation. Text/HTML must be UTF-8 without embedded NUL;
+  * other formats are opaque bytes and cannot be empty on the native API.
+  */
+export interface ClipboardMimeContent {
+  mime: string
+  data: Array<number>
 }
 
 export interface ClipboardReadContentResponse {
@@ -96,62 +89,17 @@ export interface ClipboardReadContentResponse {
   uris: Array<string>
 }
 
-export interface ClipboardReadRecordsResponse {
-  records: Array<ClipboardRecord>
+export interface ClipboardReadMimeResponse {
+  contents: Array<ClipboardMimeContent>
+  available: Array<string>
 }
 
-export interface ClipboardReadTextRequest {
-
-}
-
-export interface ClipboardReadTextResponse {
-  text?: string
-}
-
-/** One native pasteboard record. Exactly one of text, encoded_image, or uri is set. */
+/** A convenience projection of one record. Use `read_mime` for all representations. */
 export interface ClipboardRecord {
   text?: string
   metadata?: string
   encodedImage?: Array<number>
   uri?: string
-}
-
-export interface ClipboardWriteEncodedImageRequest {
-  bytes: Array<number>
-}
-
-export interface ClipboardWriteHtmlRequest {
-  html: string
-}
-
-export interface ClipboardWriteHtmlResponse {
-  accepted: boolean
-}
-
-export interface ClipboardWriteImageRequest {
-  rgba: Array<number>
-  width: number
-  height: number
-}
-
-export interface ClipboardWriteImageResponse {
-  accepted: boolean
-}
-
-export interface ClipboardWriteRecordsRequest {
-  records: Array<ClipboardRecord>
-}
-
-export interface ClipboardWriteTextRequest {
-  text: string
-}
-
-export interface ClipboardWriteTextResponse {
-  accepted: boolean
-}
-
-export interface ClipboardWriteUrisRequest {
-  uris: Array<string>
 }
 
 /**
@@ -217,6 +165,21 @@ export interface EnvironmentCallback {
 
 export interface KeyboardCallback {
   onKeyboardHeightChange: (arg: number) => void
+}
+
+/** Identifies a ready FrameNode. Decoding never attaches it. */
+export interface NativeNodeReady {
+  targetId: number
+}
+
+/** Synchronous notification before an ArkTS owner disposes its content. */
+export interface NativeNodeRetiring {
+  targetId: number
+}
+
+/** Identifies a ready wrapper and NodeContent slot. Decoding never mounts either one. */
+export interface NativeSubtreeReady {
+  targetId: number
 }
 
 export interface NodeAcknowledgement {
@@ -444,6 +407,11 @@ export interface MenuItemData {
   text?: string
   enabled?: boolean
   accelerator?: string
+  /**
+    * Show the chord while the native renderer owns key dispatch and context.
+    * Missing/false retains ordinary native menu accelerator handling.
+    */
+  acceleratorDisplayOnly?: boolean
   predefinedType?: string
   checked?: boolean
   icon?: string
@@ -672,6 +640,17 @@ export interface WindowPromptAnchor {
   y: number
 }
 
+/** Application-owned semantic colors in ARGB order, including alpha. */
+export interface WindowPromptAppearance {
+  background: number
+  foreground: number
+  mutedForeground: number
+  primary: number
+  primaryForeground: number
+  border: number
+  focus: number
+}
+
 export interface WindowPromptRequest {
   windowId: number
   message: string
@@ -682,6 +661,8 @@ export interface WindowPromptRequest {
   cancelIndex?: number
   /** Optional content-local position in logical vp units, not physical px or screen coordinates. */
   anchor?: WindowPromptAnchor
+  /** Omit to follow the target window's system colors. */
+  appearance?: WindowPromptAppearance
 }
 
 export interface WindowPromptResponse {
@@ -705,6 +686,20 @@ export interface WindowStackResponse {
 
 export interface WindowStateResponse {
   value: boolean
+}
+
+/** Status-bar settings; zero selects the component's window. */
+export interface WindowStatusBarRequest {
+  /** Window ID, or zero for the component's window. */
+  windowId: number
+  /** Whether the status bar is visible. */
+  enabled: boolean
+  /** White text/icons when true, black when false. */
+  lightContent: boolean
+  /** Optional background, in ARGB. */
+  background?: number
+  /** Animate visibility changes. */
+  animated: boolean
 }
 
 export interface WindowTitleRequest {
@@ -765,3 +760,4 @@ export interface TerminateRequest {
 export interface TerminateResponse {
   accepted: boolean
 }
+

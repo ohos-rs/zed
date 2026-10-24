@@ -15,14 +15,15 @@ Initialize the single runtime source tree from the repository root:
 git submodule update --init --recursive
 ```
 
-`../vendor/gpui-ohos` is pinned to `926312228125849d677b7dc911279f6bcf1b83ce`.
-Its nested Ability submodule is pinned to
-`05ce9195ea66876dc64a9481a76f03abb2ea20db`; that runtime pins IME binding
-`842f4d4105b6c34a7c108d29c88d17cb496ed912`.
+The local runtime integration uses GPUI OHOS PR #7 at
+`bccbfe75dd578f8c6685ea77e75ccb70d85eb952` with Ability PR #109 at
+`b22ac744017d86cb6e7acddfc0f230126c536bff`. That runtime pins native bindings
+`43aec6c125503a47f7e875c793aaf2462e91ad19`.
 Rust and ArkTS both consume this same Ability directory. Do not copy the runtime
 into the application or substitute a registry package on only one side.
-Zed's local GPUI crate supplies native menu, prompt appearance and RGBA capture interfaces and
-retains the existing terminal interfaces for the separate terminal work.
+Zed's existing `Window::prompt` and `PlatformWindow::prompt` interfaces are used
+without additional styling parameters or application-global prompt state.
+The existing terminal changes remain separate from this integration.
 
 The application remains a separate Cargo workspace. The parent workspace
 excludes this project and the nested runtime workspaces so dependency metadata
@@ -30,7 +31,9 @@ is inherited from each package's actual workspace.
 
 ## Build
 
-Use the installed DevEco SDK and the pinned Rust 1.98.1 toolchain:
+Use the installed DevEco API 26 SDK and the pinned Rust 1.98.1 toolchain.
+The application enables the runtime's API-26 input consumption and declares
+HarmonyOS 7.0 / API 26 as its minimum supported version:
 
 ```sh
 cd zed-ohos
@@ -58,40 +61,62 @@ workspace windows through the shared runtime. The system renders menus and
 prompts, while Zed owns action validation, shortcuts, unsaved-change confirmation,
 workspace persistence and the decision to exit after its last window closes.
 The app disables the runtime's extra menu bar and shortcut dispatcher.
-Native confirmations receive the active Zed theme's surface, text, accent, border
-and focus colors. The runtime composites alpha and repairs unreadable color
-pairs; applications which omit prompt appearance keep system colors.
+Ability resolves native confirmation colors from the target window's system
+resources, following its light or dark appearance. Zed themes keep their own
+editor colors; no extra color protocol is added to GPUI's prompt interface.
+Native color channels use the SDK's 0–255 alpha range directly.
 Theme selection uses the system appearance captured before previewing, so native
 chrome updates do not undo the selected theme.
 
 Zed retains its existing asynchronous save confirmation workflow. Cancelling or
 failing a close leaves the window available for another request.
+Ability defers pre-IME keys until their disposition is known. Foreground wakes
+can continue while waiting, so an early wake cannot suppress an unconsumed
+shortcut. IME edits resolve their key before the committed text is delivered.
+
 Native menu opening clears the current window's pending shortcut prefix even
 though the editor's GPUI focus is retained. Ability renders confirmation cards
 with neutral semantic colors, an outlined cancel control and one primary action,
 using a wrapping desktop footer and a stacked layout in narrow windows.
 
+Persistent file grants are explicitly enabled by the Zed host. The runtime
+restores them in the background after the first presented frame; the HAP
+declares `ohos.permission.FILE_ACCESS_PERSIST`.
+
 Restart state must be persisted before requesting the SDK restart. A rejected
 restart request retains existing windows and shows an error. An accepted restart
 may terminate the process before shutdown observers finish.
 
+Window teardown retains its native registration when destruction fails and
+propagates the error. Late completion cannot unregister a replacement window
+with the same ID. Managed floating windows use the same cleanup path as their
+window manager. This preserves runtime ownership; it does not restore a GPUI
+view which the application has already released.
+
+The OHOS Cargo configuration uses Zed's existing external-package update
+explanation. Automatic Linux binary replacement is disabled, and Check for
+Updates directs users to install a newer HarmonyOS package. An automatic OHOS
+update channel is not configured.
+
 ## Verification limits
 
-The integrated ARM64 Release library and ArkTS host were installed on a fresh
-DevEco IDE MateBook Pro API 26 emulator. Native application menus and submenus,
-settings, independent workspaces, focus return, unsaved-buffer restoration,
-close cancellation, restart confirmation cancellation and accepted process
-restart were exercised. The owned emulator was stopped and deleted afterward.
+On 2026-10-24, Ability PR #109 at `b22ac744017d86cb6e7acddfc0f230126c536bff`
+was built into the ARM64 Release library and ArkTS host, then installed on the
+DevEco IDE MateBook Pro API 26 emulator. Its committed input, prompt-alpha,
+prompt 0ms exit transition, and window-destruction fixes were used directly.
+Regression covered selection, replacement, Backspace, in-app clipboard, Chinese
+IME commit/deletion, shortcut chords, native menus, One Light/One Dark/Gruvbox
+Light confirmations, immediate shortcut typeahead after prompt dismissal,
+independent settings/workspace windows, focus return, normal close without
+`app_will_quit` timeout, and unsaved-buffer restoration. The native save picker
+and cancellation were also exercised.
 
 Host regressions and SDK compilation do not establish complete native parity.
 Creation-time input routing, task-center close/cancel visibility, independent
 main-window non-activating launch and hardware-enforced provider permissions
 remain separate acceptance items. The SDK does not promise `focus=false` for an
 independent UIAbility main window.
-Normal exit also logged `timed out waiting on app_will_quit`; the buffer was
-restored after relaunch, but complete shutdown-observer completion remains
-unverified.
 
 The existing terminal implementation and tool packaging are retained; this
-integration does not add terminal fixes. Native validation uses a new dedicated
-DevEco IDE emulator and closes only that owned instance afterward.
+integration does not add terminal fixes. Native validation used a new dedicated
+DevEco IDE emulator; that instance was stopped and deleted after regression.

@@ -2102,15 +2102,17 @@ impl NativeAgent {
         &mut self,
         cx: &mut Context<Self>,
     ) -> impl Future<Output = ()> + use<> {
-        let database_future = ThreadsDatabase::connect(cx);
-
         let mut saves = Vec::new();
         for session in self.sessions.values() {
             let draft_prompt = session.draft_prompt(cx);
             saves.extend(self.thread_save_payload(session, draft_prompt, cx));
         }
+        let database_future = (!saves.is_empty()).then(|| ThreadsDatabase::connect(cx));
 
         async move {
+            let Some(database_future) = database_future else {
+                return;
+            };
             let Some(database) = database_future.await.map_err(|err| anyhow!(err)).log_err() else {
                 return;
             };

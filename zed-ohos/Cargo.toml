@@ -15,7 +15,7 @@ test = false
 anyhow = "1"
 audio = { path = "../crates/audio" }
 futures = "0.3"
-gpui-ohos = { path = "../vendor/gpui-ohos", default-features = false, features = ["gles"] }
+gpui-ohos = { path = "../vendor/gpui-ohos", default-features = false, features = ["gles", "api-26"] }
 log = "0.4"
 napi-derive-ohos = "=1.2.0"
 napi-ohos = "=1.2.0"
@@ -42,6 +42,17 @@ zed = { codegen-units = 16 }
 
 [patch."https://github.com/ohos-rs/zed"]
 gpui = { path = "../crates/gpui" }
+
+[patch."https://github.com/harmony-contrib/openharmony-ability.git"]
+openharmony-ability = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/ability" }
+openharmony-ability-plugin-app-control = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-app-control" }
+openharmony-ability-plugin-clipboard = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-clipboard" }
+openharmony-ability-plugin-files = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-files" }
+openharmony-ability-plugin-menu = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-menu" }
+openharmony-ability-plugin-notification = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-notification" }
+openharmony-ability-plugin-system-state = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-system-state" }
+openharmony-ability-plugin-url = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-url" }
+openharmony-ability-plugin-window = { path = "../vendor/gpui-ohos/example/ohos/vendor/openharmony-ability/crates/plugin-window" }
 
 [patch.crates-io]
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }

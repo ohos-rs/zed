@@ -698,6 +698,10 @@ impl Telemetry {
                 }
             }
 
+            if ZED_CLIENT_CHECKSUM_SEED.is_none() || cfg!(target_os = "ohos") {
+                return Ok(());
+            }
+
             (
                 json_bytes,
                 EventRequestBody {

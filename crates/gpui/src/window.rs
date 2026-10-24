@@ -5694,6 +5694,13 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            // Native file drags may arrive without mouse events in this window.
+            // Drop targets must still receive mouse hover styling and hit testing.
+            PlatformInput::FileDrop(
+                FileDropEvent::Entered { .. }
+                | FileDropEvent::Pending { .. }
+                | FileDropEvent::Submit { .. },
+            ) => InputModality::Mouse,
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
@@ -6838,13 +6845,7 @@ impl Window {
         let receiver = match &prompt_builder {
             PromptBuilder::Default => self
                 .platform_window
-                .prompt_with_style(
-                    level,
-                    message,
-                    detail,
-                    &answers,
-                    cx.native_prompt_style.as_ref(),
-                )
+                .prompt(level, message, detail, &answers)
                 .unwrap_or_else(|| {
                     self.build_custom_prompt(&prompt_builder, level, message, detail, &answers, cx)
                 }),
@@ -8044,6 +8045,65 @@ mod tests {
         TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
         canvas, div, hsla, point, px, size,
     };
+
+    #[gpui::test]
+    fn test_external_file_drop_after_keyboard_input(cx: &mut TestAppContext) {
+        struct DropTarget(Rc<Cell<bool>>);
+
+        impl Render for DropTarget {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().relative().size_full().group("drop-target").child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .invisible()
+                        .group_drag_over::<ExternalPaths>("drop-target", |style| style.visible())
+                        .on_drop({
+                            let dropped = self.0.clone();
+                            move |_: &ExternalPaths, _, _| dropped.set(true)
+                        }),
+                )
+            }
+        }
+
+        let dropped = Rc::new(Cell::new(false));
+        let window = cx.add_window({
+            let dropped = dropped.clone();
+            move |_, _| DropTarget(dropped)
+        });
+        let result = cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                PlatformInput::KeyDown(crate::KeyDownEvent {
+                    keystroke: Keystroke {
+                        key: "escape".into(),
+                        key_char: None,
+                        modifiers: Default::default(),
+                    },
+                    is_held: false,
+                    prefer_character_input: false,
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            let position = point(px(30.), px(30.));
+            window.dispatch_event(
+                FileDropEvent::Entered {
+                    position,
+                    paths: ExternalPaths([PathBuf::from("/tmp/dropped.txt")].into_iter().collect()),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+        });
+        assert!(result.is_ok(), "failed to dispatch file drop: {result:?}");
+        assert!(
+            dropped.get(),
+            "external files must reach the visible drop target"
+        );
+    }
 
     #[gpui::test]
     async fn test_focus_handle_release(cx: &mut TestAppContext) {
