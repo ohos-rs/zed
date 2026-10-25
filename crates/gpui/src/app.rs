@@ -51,8 +51,8 @@ use crate::{
     FocusMap, ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId,
     Menu, MenuItem, MissingGlyph, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
     PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
-    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
-    ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer,
+    PromptHandle, PromptLevel, PromptStyle, Render, RenderImage, RenderablePromptHandle,
+    Reservation, ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer,
     SystemNotification, SystemNotificationResponse, Task, TextRenderingMode, TextSystem,
     ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
     WindowInvalidator, WindowingRequest,
@@ -920,6 +920,7 @@ pub struct App {
     pub(crate) layout_id_buffer: Vec<LayoutId>, // We recycle this memory across layout requests.
     pub(crate) propagate_event: bool,
     pub(crate) prompt_builder: Option<PromptBuilder>,
+    pub(crate) native_prompt_style: Option<PromptStyle>,
     pub(crate) window_invalidators_by_entity:
         FxHashMap<EntityId, FxHashMap<WindowId, WindowInvalidator>>,
     pub(crate) tracked_entities: FxHashMap<WindowId, FxHashSet<EntityId>>,
@@ -1038,6 +1039,7 @@ impl App {
                 layout_id_buffer: Default::default(),
                 propagate_event: true,
                 prompt_builder: Some(PromptBuilder::Default),
+                native_prompt_style: None,
                 #[cfg(any(feature = "inspector", debug_assertions))]
                 inspector_renderer: None,
                 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -3134,6 +3136,12 @@ impl App {
         + 'static,
     ) {
         self.prompt_builder = Some(PromptBuilder::Custom(Box::new(renderer)));
+    }
+
+    /// Set colors for subsequently opened native prompts on supporting backends.
+    /// Passing `None` restores the platform's system colors.
+    pub fn set_native_prompt_style(&mut self, style: Option<PromptStyle>) {
+        self.native_prompt_style = style;
     }
 
     /// Reset the prompt builder to the default implementation.
